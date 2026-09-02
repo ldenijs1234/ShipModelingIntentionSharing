@@ -1,4 +1,4 @@
-from typing import Tuple, Dict, Any, Optional
+from typing import Any, Dict, Optional, Tuple
 import numpy as np
 
 from gnc_core.models.vessel_dynamics import VesselDynamics
@@ -22,15 +22,9 @@ class SynchronousPipeline:
         dt: float = 0.02,
         u_nominal: float = 0.5,
     ) -> Tuple[np.ndarray, Dict[str, Any], Dict[str, Any]]:
-        """
-        Executes one tick (dt = 0.02s) of the multi-rate synchronous loop (Section 3.2.3).
-        - 50 Hz: State estimation, control, plant integration (k % 1 == 0)
-        - 20 Hz: Guidance (k % 2 == 0 or sub-stepped)
-        - 10 Hz: Risk & Decision (k % 5 == 0)
-        """
-        # 1. State Estimation (50 Hz)
+        # 1. State Estimation (50 Hz) - Own Ship & Target Ship from AIS
         x_os = StateEstimation.estimate_own_state(internal_state)
-        x_ts = StateEstimation.estimate_target_state(x_ts_raw)
+        x_ts = StateEstimation.estimate_target_from_ais(x_ts_raw, dt_ais=dt)
 
         # 2. Risk & Decision (10 Hz: every 5 ticks)
         if tick % 5 == 0:
