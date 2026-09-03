@@ -24,6 +24,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'os_transceiver_node = own_ship_gnc.os_transceiver_node:main',
+            'live_plotter = own_ship_gnc.live_plotter:main',
         ],
     },
 )

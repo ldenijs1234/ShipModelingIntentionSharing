@@ -47,10 +47,37 @@ class RiskCalculator:
         return float(dcpa), float(tcpa)
 
     @staticmethod
-    def project_ts_on_shared_trajectory(x_ts_pos: np.ndarray, w_ts: np.ndarray) -> Tuple[int, float]:
-        """Projects TS position onto delayed intention waypoints (Eq. 3.25 - 3.31)."""
+    def calculate_trajectory_cpa(
+        os_trajectory: np.ndarray, 
+        ts_trajectory: np.ndarray,
+        dt: float = 0.05
+    ) -> Tuple[float, float]:
+        """
+        Computes minimum Euclidean distance (DCPA) in meters and time (TCPA) in seconds
+        across synchronized future discrete look-ahead arrays.
+        """
+        min_len = min(len(os_trajectory), len(ts_trajectory))
+        if min_len == 0:
+            return float("inf"), 0.0
+
+        diffs = os_trajectory[:min_len, :2] - ts_trajectory[:min_len, :2]
+        distances = np.linalg.norm(diffs, axis=1)
+
+        min_idx = int(np.argmin(distances))
+        dcpa = float(distances[min_idx])
+        tcpa = float(min_idx * dt)
+        
+        return dcpa, tcpa
+
+    @staticmethod
+    def project_ts_on_shared_trajectory(
+        x_ts_pos: np.ndarray, 
+        w_ts: np.ndarray, 
+        u_ts: float = 0.5
+    ) -> Tuple[int, float, float]:
+        """Projects TS position onto delayed intention waypoints (Eq. 3.25 - 3.32)."""
         if len(w_ts) < 2:
-            return 0, 0.0
+            return 0, 0.0, 0.0
 
         best_j, min_cte, best_d_seg = 0, float("inf"), 0.0
         for j in range(len(w_ts) - 1):
@@ -67,4 +94,7 @@ class RiskCalculator:
                 min_cte, best_j = e_cte, j
                 best_d_seg = c_j * np.sqrt(L_norm_sq)
 
-        return best_j, float(best_d_seg)
+        # Eq. 3.32: t_progress along current segment
+        t_progress = best_d_seg / max(u_ts, 1e-3)
+
+        return best_j, float(best_d_seg), float(t_progress)

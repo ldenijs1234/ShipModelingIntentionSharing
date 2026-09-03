@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
 import numpy as np
@@ -9,7 +10,9 @@ class TSSimulatorNode(Node):
     def __init__(self):
         super().__init__('ts_simulator_node')
         
-        # Initial condition: X=25m ahead, heading South (psi = pi rad)
+        # Parameter to toggle sharing the route intention
+        self.declare_parameter('share_intent', True)
+
         self.x = 25.0
         self.y = 0.0
         self.psi = np.pi
@@ -22,7 +25,9 @@ class TSSimulatorNode(Node):
 
         self.state_timer = self.create_timer(self.dt, self.step_kinematics)
         self.route_timer = self.create_timer(1.0, self.publish_route)
-        self.get_logger().info('TS Simulator initialized (Case 1 Head-On).')
+        
+        mode = "WITH intent" if self.get_parameter('share_intent').value else "WITHOUT intent"
+        self.get_logger().info(f'TS Simulator initialized ({mode}).')
 
     def step_kinematics(self):
         self.x += self.u * np.cos(self.psi) * self.dt
@@ -40,17 +45,22 @@ class TSSimulatorNode(Node):
         self.state_pub.publish(msg)
 
     def publish_route(self):
+        share_intent = self.get_parameter('share_intent').value
+        
         route_msg = RouteIntent()
         route_msg.header.stamp = self.get_clock().now().to_msg()
         route_msg.vessel_mmsi = 244000002
         route_msg.planned_speed = 0.5
         
-        # Reciprocal track south towards X=0.0
-        wps = [[25.0, 0.0], [12.5, 0.0], [0.0, 0.0]]
-        for wp in wps:
-            p = Point()
-            p.x, p.y, p.z = float(wp[0]), float(wp[1]), 0.0
-            route_msg.route.append(p)
+        if share_intent:
+            wps = [[25.0, 0.0], [12.5, 0.0], [0.0, 0.0]]
+            for wp in wps:
+                p = Point()
+                p.x, p.y, p.z = float(wp[0]), float(wp[1]), 0.0
+                route_msg.route.append(p)
+        else:
+            # Broadcast empty route if intent sharing is disabled
+            route_msg.route = []
 
         self.route_pub.publish(route_msg)
 
