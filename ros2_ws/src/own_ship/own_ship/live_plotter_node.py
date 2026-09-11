@@ -12,32 +12,37 @@ class LivePlotterNode(Node):
     def __init__(self):
         super().__init__('live_plotter')
         
-        # Current states
         self.os_state = [0.0, 0.0, 0.0]
         self.ts_state = [30.0, 0.0, math.pi]
         
-        # Route intention arrays (dynamic)
+        # Active waypoint arrays
+        self.os_wps_x = [0.0, 40.0]
+        self.os_wps_y = [0.0, 0.0]
         self.ts_route_x = []
         self.ts_route_y = []
 
-        # History arrays for the sailed route imprint
+        # History arrays
         self.os_history_x = []
         self.os_history_y = []
         self.ts_history_x = []
         self.ts_history_y = []
         
-        # Subscriptions
         self.create_subscription(Float64MultiArray, '/os/state_vector', self.os_callback, 10)
+        self.create_subscription(Float64MultiArray, '/os/active_waypoints', self.os_wps_callback, 10)
         self.create_subscription(VesselKinematics, '/ts/state_vector', self.ts_callback, 10)
-        self.create_subscription(RouteIntent, '/ts/route_true', self.ts_route_callback, 10)
+        self.create_subscription(RouteIntent, '/ts/route_delayed', self.ts_route_callback, 10)
         
         self.get_logger().info("Live Plotter listening to OS and TS states...")
 
+    def os_wps_callback(self, msg):
+        arr = np.array(msg.data).reshape(-1, 2)
+        self.os_wps_x = arr[:, 0].tolist()
+        self.os_wps_y = arr[:, 1].tolist()
+
     def os_callback(self, msg):
-        # Reset history if the ship "teleports" (indicates a simulation restart)
         if self.os_history_x:
             dist = math.hypot(msg.data[0] - self.os_history_x[-1], msg.data[1] - self.os_history_y[-1])
-            if dist > 5.0:  # Huge jump = restart
+            if dist > 5.0:
                 self.os_history_x.clear()
                 self.os_history_y.clear()
 
@@ -46,7 +51,6 @@ class LivePlotterNode(Node):
         self.os_history_y.append(msg.data[1])
 
     def ts_callback(self, msg):
-        # Reset history if the ship "teleports"
         if self.ts_history_x:
             dist = math.hypot(msg.x - self.ts_history_x[-1], msg.y - self.ts_history_y[-1])
             if dist > 5.0:
@@ -58,7 +62,6 @@ class LivePlotterNode(Node):
         self.ts_history_y.append(msg.y)
 
     def ts_route_callback(self, msg):
-        # Dynamically update the intention line based on network payload
         self.ts_route_x = [pt.x for pt in msg.route]
         self.ts_route_y = [pt.y for pt in msg.route]
 
@@ -104,14 +107,14 @@ def main(args=None):
             ax.set_title("Live GNC Simulation")
             ax.grid(True, linestyle='--', alpha=0.6)
 
-            # 1. Draw OS Mission Intention (Remains static as OS always has a plan)
-            ax.plot([0, 0], [0, 40], 'b--', alpha=0.3, label='OS Mission')
+            # 1. Draw Active OS Waypoints (Dynamic)
+            ax.plot(node.os_wps_y, node.os_wps_x, 'b--', alpha=0.5, label='OS Active Waypoints')
             
-            # 2. Draw TS Route Intent ONLY if the array is populated (share_intent=True)
+            # 2. Draw TS Route Intent
             if node.ts_route_x and node.ts_route_y:
-                ax.plot(node.ts_route_y, node.ts_route_x, 'r--', alpha=0.3, label='TS Route Intent')
+                ax.plot(node.ts_route_y, node.ts_route_x, 'r--', alpha=0.5, label='TS Route Intent')
 
-            # 3. Draw Sailed Route History (Solid lines)
+            # 3. Draw Sailed Route History
             ax.plot(list(node.os_history_y), list(node.os_history_x), 'b-', linewidth=2, alpha=0.7, label='OS Sailed')
             ax.plot(list(node.ts_history_y), list(node.ts_history_x), 'r-', linewidth=2, alpha=0.7, label='TS Sailed')
 
