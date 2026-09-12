@@ -6,7 +6,7 @@ Coordinates are in NED [North (X), East (Y)].
 
 import numpy as np
 
-CASE_CONFIG = {
+CASE01_CONFIG = {
     "name": "case01",
     "description": "Imazu Case 01: Symmetrical Head-On Encounter",
     

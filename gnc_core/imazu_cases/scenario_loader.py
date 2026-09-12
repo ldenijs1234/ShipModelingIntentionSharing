@@ -1,19 +1,14 @@
-"""
-scenario_loader.py
-Dynamic importer for benchmark encounter scenarios.
-"""
+# Import whatever dictionary name is defined in each file
+from gnc_core.imazu_cases.case01.case01_config import CASE01_CONFIG
+from gnc_core.imazu_cases.case02.case02_config import CASE02_CONFIG
+from gnc_core.imazu_cases.case03.case03_config import CASE03_CONFIG
 
-import importlib
-from typing import Dict, Any
-
-def load_scenario(scenario_name: str) -> Dict[str, Any]:
-    """Dynamically imports and returns the CASE_CONFIG for a given scenario name."""
-    module_path = f"gnc_core.imazu_cases.{scenario_name}.{scenario_name}_config"
-    try:
-        scenario_module = importlib.import_module(module_path)
-        return scenario_module.CASE_CONFIG
-    except ModuleNotFoundError as e:
-        raise ValueError(
-            f"Scenario '{scenario_name}' not found. "
-            f"Ensure '{module_path}.py' exists."
-        ) from e
+def load_scenario(name: str):
+    cases = {
+        "case01": CASE01_CONFIG,
+        "case02": CASE02_CONFIG,
+        "case03": CASE03_CONFIG,
+    }
+    if name.lower() not in cases:
+        raise ValueError(f"Unknown scenario '{name}'. Available: {list(cases.keys())}")
+    return cases[name.lower()]

@@ -32,14 +32,25 @@ class SynchronousPipeline:
             x_os, x_ts, w_mission_os, w_ts_delayed, cached["dcpa"], cached["tcpa"]
         )
 
-        # 3. Guidance Layer (10 Hz)
+        # 3. Guidance Layer
         cached["psi_wp"], _, cached["wp_idx"] = LOSGuidance.compute_heading_reference(
             x_os, cached["w_active"], cached["wp_idx"]
         )
 
-        # 4. Control Layer (10 Hz)
+        # ROOT FIX 2: In State B.1, base heading command on nominal track direction (pi_p)
+        # rather than allowing cross-track error to cancel out psi_ca
+        if cached["state"] == "State B.1":
+            # Nominal track bearing from mission waypoints (e.g. 0.0 rad for due North)
+            p_start = w_mission_os[0]
+            p_end = w_mission_os[-1]
+            pi_p = float(np.arctan2(p_end[1] - p_start[1], p_end[0] - p_start[0]))
+            psi_guidance_ref = pi_p
+        else:
+            psi_guidance_ref = cached["psi_wp"]
+
+        # 4. Control Layer (Eq. 3.42: psi_cmd = psi_ref + psi_ca)
         u_c, tau_c, psi_cmd = Autopilot.compute_control(
-            x_os, cached["psi_wp"], cached["psi_ca"], u_nominal
+            x_os, psi_guidance_ref, cached["psi_ca"], u_nominal
         )
 
         # 5. Vessel Dynamics Integration via RK4 (10 Hz)

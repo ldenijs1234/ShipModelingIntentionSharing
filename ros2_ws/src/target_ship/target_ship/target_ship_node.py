@@ -14,6 +14,7 @@ from geometry_msgs.msg import Point
 from std_msgs.msg import Float64MultiArray
 from maritime_interfaces.msg import RouteIntent, VesselKinematics
 
+from gnc_core.config.vessel_params import VesselParams
 from gnc_core.imazu_cases.scenario_loader import load_scenario
 from gnc_core.guidance.los import LOSGuidance
 from gnc_core.control.autopilot import Autopilot
@@ -28,14 +29,16 @@ class TSSimulatorNode(Node):
         self.declare_parameter('scenario', 'case01')
         self.declare_parameter('share_intent', True)
         self.declare_parameter('t_advance', 15.0)
+        self.declare_parameter('speed_factor', 1.0)
 
         scenario_name = self.get_parameter('scenario').value
         config = load_scenario(scenario_name)
 
         self.share_intent = bool(self.get_parameter('share_intent').value)
         self.t_advance = float(self.get_parameter('t_advance').value)
+        self.speed_factor = max(float(self.get_parameter('speed_factor').value), 0.1)
 
-        self.dt = 0.05  # 20 Hz
+        self.dt = 0.05  # 20 Hz integration step
         self.u_nominal = float(config['ts_nominal_speed'])
         self.w_mission_ts = config['ts_mission_wps'].copy()
         self.wp_idx = 1
@@ -49,17 +52,21 @@ class TSSimulatorNode(Node):
         self.state_pub = self.create_publisher(VesselKinematics, '/ts/state_vector', 10)
         self.route_pub = self.create_publisher(RouteIntent, '/ts/route_true', 10)
         
-        # Subscribe to OS state to calculate real-time relative TCPA
         self.os_sub = self.create_subscription(
             Float64MultiArray, '/os/state_vector', self.os_state_callback, 10
         )
 
-        # 4. Timers
-        self.state_timer = self.create_timer(self.dt, self.step_gnc_pipeline)
-        self.route_timer = self.create_timer(0.1, self.publish_route)  # Check at 10 Hz
+        # 4. Timers scaled by speed_factor
+        dt_state_timer = self.dt / self.speed_factor
+        dt_route_timer = 0.1 / self.speed_factor
+
+        self.state_timer = self.create_timer(dt_state_timer, self.step_gnc_pipeline)
+        self.route_timer = self.create_timer(dt_route_timer, self.publish_route)
 
         mode = f"WITH intent (t_advance = {self.t_advance}s)" if self.share_intent else "WITHOUT intent"
-        self.get_logger().info(f"TS Simulator running for [{scenario_name}] ({mode}).")
+        self.get_logger().info(
+            f"TS Simulator running for [{scenario_name}] ({mode}) at {self.speed_factor}x speed."
+        )
 
     def os_state_callback(self, msg: Float64MultiArray):
         # OS state vector: [x, y, psi, r, b, u]
@@ -100,7 +107,11 @@ class TSSimulatorNode(Node):
             current_wp_idx=self.wp_idx
         )
 
-        # B. Control Layer (Autopilot)
+        # B. Check distance to final destination and command zero speed on arrival
+        dist_to_final = float(np.linalg.norm(self.internal_state[0:2] - self.w_mission_ts[-1, 0:2]))
+        u_target = 0.0 if dist_to_final <= VesselParams.D_m else self.u_nominal
+
+        # C. Control Layer (Autopilot)
         x_ctrl = self.internal_state.copy()
         x_ctrl[5] = self.internal_state[3]  # Map r to index 5 for Autopilot
 
@@ -108,10 +119,10 @@ class TSSimulatorNode(Node):
             x_os=x_ctrl,
             psi_wp=psi_los,
             psi_ca_reactive=0.0,
-            u_nominal=self.u_nominal
+            u_nominal=u_target
         )
 
-        # C. Vessel Dynamics
+        # D. Vessel Dynamics
         inputs = np.array([tau_c, u_c], dtype=np.float64)
         self.internal_state = VesselDynamics.rk4(
             x=self.internal_state,
@@ -119,7 +130,7 @@ class TSSimulatorNode(Node):
             dt=self.dt
         )
 
-        # D. Publish true TS kinematics
+        # E. Publish true TS kinematics
         msg = VesselKinematics()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.vessel_mmsi = 244000002

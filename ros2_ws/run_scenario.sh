@@ -5,6 +5,7 @@ SCENARIO=${1:-"case01"}
 TAU=${2:-0.5}
 SHARE_INTENT=${3:-True}
 T_ADVANCE=${4:-15.0}
+SPEED_FACTOR=${5:-1.0}
 
 WS_DIR="/mnt/c/Users/lars/Documents/Ship dynamics - Thesis Lars de Nijs/ros2_ws"
 
@@ -23,4 +24,5 @@ ros2 launch own_ship run_scenario.launch.py \
     scenario:=$SCENARIO \
     tau:=$TAU \
     share_intent:=$SHARE_INTENT \
-    t_advance:=$T_ADVANCE
+    t_advance:=$T_ADVANCE \
+    speed_factor:=$SPEED_FACTOR

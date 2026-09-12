@@ -8,13 +8,14 @@ def generate_launch_description():
     tau_arg = DeclareLaunchArgument('tau', default_value='0.5')
     share_intent_arg = DeclareLaunchArgument('share_intent', default_value='True')
     t_advance_arg = DeclareLaunchArgument('t_advance', default_value='15.0')
+    speed_factor_arg = DeclareLaunchArgument('speed_factor', default_value='1.0')
 
     return LaunchDescription([
         scenario_arg,
         tau_arg,
         share_intent_arg,
         t_advance_arg,
-
+        speed_factor_arg,
         # 1. Target Ship Node
         Node(
             package='target_ship',
@@ -25,6 +26,7 @@ def generate_launch_description():
                 'scenario': LaunchConfiguration('scenario'),
                 'share_intent': LaunchConfiguration('share_intent'),
                 't_advance': LaunchConfiguration('t_advance'),
+                'speed_factor': LaunchConfiguration('speed_factor'),
             }]
         ),
 
@@ -47,6 +49,7 @@ def generate_launch_description():
             output='screen',
             parameters=[{
                 'scenario': LaunchConfiguration('scenario'),
+                'speed_factor': LaunchConfiguration('speed_factor'),
             }]
         ),
 
@@ -60,4 +63,5 @@ def generate_launch_description():
                 'scenario': LaunchConfiguration('scenario'),
             }]
         )
+
     ])

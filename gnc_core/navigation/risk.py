@@ -98,3 +98,48 @@ class RiskCalculator:
         t_progress = best_d_seg / max(u_ts, 1e-3)
 
         return best_j, float(best_d_seg), float(t_progress)
+
+    @staticmethod
+    def check_ship_domain_breach(x_os: np.ndarray, x_ts: np.ndarray) -> Tuple[bool, float]:
+        """
+        Evaluates elliptical ship domain breach against the 4 TS hull OBB corners (Eq. 2.6).
+        Returns (breached: bool, min_domain_metric: float).
+        """
+        from gnc_core.config.vessel_params import VesselParams
+
+        # 1. TS Hull OBB 4 corners in TS body frame
+        half_l = VesselParams.L / 2.0
+        half_b = VesselParams.B / 2.0
+        corners_ts_local = np.array([
+            [ half_l,  half_b],
+            [ half_l, -half_b],
+            [-half_l, -half_b],
+            [-half_l,  half_b]
+        ])
+
+        # 2. Transform TS corners to Global Frame (X_ob,i, Y_ob,i)
+        psi_ts = x_ts[2]
+        r_ts = np.array([
+            [np.cos(psi_ts), -np.sin(psi_ts)],
+            [np.sin(psi_ts),  np.cos(psi_ts)]
+        ])
+        corners_global = x_ts[:2] + (r_ts @ corners_ts_local.T).T
+
+        # 3. Transform Global Corners to OS Body Frame (Eq. 2.7 / eq:x,y,local)
+        psi_os = x_os[2]
+        delta_p = corners_global - x_os[:2]
+        r_os_inv = np.array([
+            [ np.cos(psi_os), np.sin(psi_os)],
+            [-np.sin(psi_os), np.cos(psi_os)]
+        ])
+        corners_os_local = (r_os_inv @ delta_p.T).T
+
+        # 4. Evaluate classical ellipse equation for all 4 corners (Eq. 2.6)
+        # Value <= 1.0 indicates a domain breach
+        domain_metrics = (corners_os_local[:, 0] / VesselParams.R_long)**2 + \
+                         (corners_os_local[:, 1] / VesselParams.R_lateral)**2
+
+        min_metric = float(np.min(domain_metrics))
+        domain_breached = min_metric <= 1.0
+
+        return domain_breached, min_metric
