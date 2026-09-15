@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import sys
+import os
 from pathlib import Path
 from gnc_core.imazu_cases.scenario_loader import load_scenario
 
@@ -36,6 +37,9 @@ class OSTransceiverNode(Node):
         self.u_nominal = float(config['os_nominal_speed'])
         self.w_mission_os = config['os_mission_wps'].copy()
         self.internal_state = config['os_initial_state'].copy()
+
+        # [FIX 1/2]: Initialize previous heading memory for true yaw rate calculation
+        self.prev_psi = float(self.internal_state[2])
 
         self.route_sub = self.create_subscription(
             RouteIntent, '/ts/route_delayed', self.ts_route_callback, 10
@@ -77,6 +81,14 @@ class OSTransceiverNode(Node):
             f"OS Transceiver initialized for [{scenario_name}] at {self.speed_factor}x speed (20 Hz pipeline)."
         )
 
+        self.declare_parameter('auto_close', False)
+        ac_param = self.get_parameter('auto_close').value
+        self.auto_close = (
+            (ac_param.upper() == 'TRUE')
+            if isinstance(ac_param, str)
+            else bool(ac_param)
+        )
+
     def ts_route_callback(self, msg: RouteIntent):
         self.w_ts_delayed = np.array([[pt.x, pt.y] for pt in msg.route])
         if self.t_intent_shared is None:
@@ -95,6 +107,9 @@ class OSTransceiverNode(Node):
         dist_to_final = np.linalg.norm(self.internal_state[:2] - target_wp)
         current_u_target = 0.0 if dist_to_final <= VesselParams.D_m else self.u_nominal
 
+        # Capture previous state before the pipeline runs
+        prev_state = self.cached["state"]
+
         # 2. Step synchronous pipeline
         self.internal_state, self.cached, telemetry = SynchronousPipeline.step(
             internal_state=self.internal_state,
@@ -105,6 +120,19 @@ class OSTransceiverNode(Node):
             dt=self.dt,
             u_nominal=current_u_target
         )
+
+        # [FIX 2/2]: Manually reconstruct the true yaw rate to bypass the physics engine bug
+        # Calculate shortest angular distance to prevent wrap-around spikes
+        diff = (self.internal_state[2] - self.prev_psi + np.pi) % (2.0 * np.pi) - np.pi
+        true_r = diff / self.dt
+        self.prev_psi = self.internal_state[2]
+        
+        # Overwrite the bugged speed value at index 5 with the true yaw rate
+        self.internal_state[5] = true_r
+
+        # Log state transition cleanly
+        if self.cached["state"] != prev_state:
+            self.get_logger().info(f"[OS] Transitioned to {self.cached['state']}")
 
         # 3. Compute instantaneous Range
         current_range = float(np.linalg.norm(self.internal_state[:2] - self.x_ts_raw[:2]))
@@ -132,19 +160,20 @@ class OSTransceiverNode(Node):
         # 6. Stop condition: both vessels have zero forward velocity
         os_stopped = abs(self.internal_state[3]) < 0.05 and dist_to_final <= (VesselParams.D_m + 0.2)
         ts_stopped = abs(self.x_ts_raw[3]) < 0.05
+        
         if os_stopped and ts_stopped:
             self.sim_finished = True
-            self.get_logger().info("\033[92mBoth vessels arrived at terminal waypoints. Plotting metrics...\033[0m")
+            self.get_logger().info("\033[92mBoth vessels arrived at terminal waypoints.\033[0m")
             self.plot_encounter_metrics()
 
-        prev_state = self.cached["state"]
-        self.cached["w_active"], self.cached["psi_ca"], self.cached["state"] = DecisionLayer.evaluate(
-            self.internal_state, self.x_ts_raw, self.w_mission_os, self.w_ts_delayed, self.cached["dcpa"], self.cached["tcpa"]
-        )
+            if self.auto_close:
+                sys.exit(0)
+            else:
+                # Once you manually close the figure window, cleanly terminate the launch
+                self.get_logger().info("Inspection window closed. Terminating scenario...")
+                sys.exit(0)
 
-        if self.cached["state"] != prev_state:
-            self.get_logger().info(f"[OS] Transitioned to {self.cached['state']}")
-
+    
     def plot_encounter_metrics(self):
         t_arr = np.array(self.hist_time)
         dcpa_arr = np.array(self.hist_dcpa)
@@ -194,7 +223,17 @@ class OSTransceiverNode(Node):
                 )
 
         plt.tight_layout()
-        plt.show()
+        
+        # Conditional display vs. background save
+        if not self.auto_close:
+            # Single-run mode: show the interactive window directly (blocks until closed)
+            plt.show()
+        else:
+            # Batch mode: save silently to disk without popping up a window
+            scenario_name = self.get_parameter('scenario').value
+            os.makedirs("results_plots", exist_ok=True)
+            plt.savefig(f"results_plots/{scenario_name}_colregs_metrics.png", dpi=300)
+            plt.close(fig)
 
 
 def main(args=None):
@@ -206,7 +245,8 @@ def main(args=None):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

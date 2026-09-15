@@ -1,7 +1,9 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
+from launch.events import Shutdown
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch.actions import EmitEvent
 
 def generate_launch_description():
     scenario_arg = DeclareLaunchArgument('scenario', default_value='case01')
@@ -9,6 +11,7 @@ def generate_launch_description():
     share_intent_arg = DeclareLaunchArgument('share_intent', default_value='True')
     t_advance_arg = DeclareLaunchArgument('t_advance', default_value='15.0')
     speed_factor_arg = DeclareLaunchArgument('speed_factor', default_value='1.0')
+    auto_close_arg = DeclareLaunchArgument('auto_close', default_value='False')
 
     return LaunchDescription([
         scenario_arg,
@@ -16,6 +19,8 @@ def generate_launch_description():
         share_intent_arg,
         t_advance_arg,
         speed_factor_arg,
+        auto_close_arg,
+        
         # 1. Target Ship Node
         Node(
             package='target_ship',
@@ -50,7 +55,9 @@ def generate_launch_description():
             parameters=[{
                 'scenario': LaunchConfiguration('scenario'),
                 'speed_factor': LaunchConfiguration('speed_factor'),
-            }]
+                'auto_close': LaunchConfiguration('auto_close')
+            }],
+            on_exit=[EmitEvent(event=Shutdown())]
         ),
 
         # 4. Live Plotter Node
@@ -61,7 +68,10 @@ def generate_launch_description():
             output='screen',
             parameters=[{
                 'scenario': LaunchConfiguration('scenario'),
-            }]
+                'mode': LaunchConfiguration('share_intent'),  # Using share_intent bool as a proxy for mode in the plotter
+                'latency': LaunchConfiguration('tau'),
+                'auto_close': LaunchConfiguration('auto_close')
+            }],
+            on_exit=[EmitEvent(event=Shutdown())]
         )
-
     ])

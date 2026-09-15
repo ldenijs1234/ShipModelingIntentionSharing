@@ -16,6 +16,10 @@ CASE02_CONFIG = {
     "os_nominal_speed": 0.45,  # [m/s]
     "os_mission_wps": np.array([
         [-20.0, 0.0],
+        [-10.0, 0.0],
+        [ -2.0, 0.0],  # Pre-conflict anchor
+        [  5.0, 0.0],  # Immediate recovery anchor (just past TS turn)
+        [ 12.0, 0.0],
         [ 20.0, 0.0]
     ], dtype=np.float64),
 
@@ -29,7 +33,7 @@ CASE02_CONFIG = {
     # TS route: South along west lane, then turns southeast at x = 5.0 m
     "ts_mission_wps": np.array([
         [ 20.0, -1.0],
-        [  5.0, -1.0],
+        [  3.0, -1.0],
         [-20.0, 10.0]
     ], dtype=np.float64),
 

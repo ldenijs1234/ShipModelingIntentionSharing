@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-from typing import Tuple, Optional
-import time
+from typing import Optional, Tuple
 import numpy as np
 import rclpy.logging
 
@@ -11,67 +10,91 @@ from gnc_core.navigation.risk import RiskCalculator
 class DecisionLayer:
     _mode_a_active = False
     _mode_b_active = False
-    _w_latched = None
+    _w_evasive_latched = None
 
-    # Akdağ's asymmetric course penalty weights (k_ci)
     k_chi_stb = 5.0
     k_chi_port = 5.2
 
-    @staticmethod
-    def _compute_cross_track_error(p: np.ndarray, a: np.ndarray, b: np.ndarray) -> float:
-        """Computes Euclidean cross-track error to segment [a, b]."""
-        ab = b - a
-        norm_ab = np.linalg.norm(ab)
-        if norm_ab < 1e-6:
-            return float(np.linalg.norm(p - a))
-        return float(abs(ab[0] * (a[1] - p[1]) - ab[1] * (a[0] - p[0])) / norm_ab)
+    # Discrete search set matching Akdag (radians)
+    chi_candidates = np.radians(
+        np.array([
+            -75.0, -60.0, -45.0, -30.0, -15.0,
+            0.0,
+            15.0, 30.0, 45.0, 60.0, 75.0,
+        ])
+    )
 
     @classmethod
-    def evaluate_reactive_offset(
-        cls, x_os: np.ndarray, x_ts: np.ndarray, scenario: str
-    ) -> float:
-        """Evaluates candidate offsets (Eq. 3.43) against linear projection."""
-        if scenario == "Head-On":
-            candidates = np.radians([30.0, 45.0, 60.0, 75.0])
-        elif scenario in ["Crossing_A", "Crossing_B"]:
-            candidates = np.radians([45.0, 60.0, 75.0, 85.0])
-        elif scenario == "Overtaking":
-            candidates = np.radians([-30.0, 30.0])
+    def _evaluate_candidate_hazard(
+        cls,
+        x_os: np.ndarray,
+        chi: float,
+        ts_traj: np.ndarray,
+        steps: int,
+        dt_sim: float,
+        d_safe: float,
+    ) -> Tuple[float, float, int]:
+        u_os = float(x_os[3]) if abs(x_os[3]) > 0.05 else 0.45
+        psi_cand = x_os[2] + chi
+
+        vx = u_os * np.cos(psi_cand)
+        vy = u_os * np.sin(psi_cand)
+
+        t_steps = np.arange(steps) * dt_sim
+        os_x = x_os[0] + vx * t_steps
+        os_y = x_os[1] + vy * t_steps
+
+        dists = np.hypot(os_x - ts_traj[:, 0], os_y - ts_traj[:, 1])
+        min_idx = int(np.argmin(dists))
+        min_dist = float(dists[min_idx])
+
+        if min_dist <= d_safe:
+            j_safety = 1000.0 * ((d_safe / max(min_dist, 0.05)) ** 4.0)
         else:
-            candidates = np.radians([30.0, 45.0, 60.0])
+            j_safety = 50.0 * (d_safe / min_dist)
 
-        u_os = max(x_os[3], 0.1)
-        u_ts = max(x_ts[3], 0.1)
-        psi_ts = x_ts[2]
-        best_chi = candidates[-1]
+        k_w = cls.k_chi_stb if chi <= 0.0 else cls.k_chi_port
+        j_control = k_w * (chi**2)
 
-        for chi in candidates:
-            psi_os_cand = x_os[2] + chi
-            vx_os = u_os * np.cos(psi_os_cand)
-            vy_os = u_os * np.sin(psi_os_cand)
-            vx_ts = u_ts * np.cos(psi_ts)
-            vy_ts = u_ts * np.sin(psi_ts)
+        return j_safety + j_control, min_dist, min_idx
 
-            dx = x_ts[0] - x_os[0]
-            dy = x_ts[1] - x_os[1]
-            dvx = vx_ts - vx_os
-            dvy = vy_ts - vy_os
-            v_rel_sq = dvx**2 + dvy**2
+    @classmethod
+    def _sample_route(
+        cls, wps: np.ndarray, pos: np.ndarray, speed: float, steps: int, dt: float
+    ) -> Tuple[np.ndarray, float]:
+        """Samples along the route starting from the orthogonal projection of pos."""
+        diffs = np.diff(wps[:, :2], axis=0)
+        seg_lens = np.hypot(diffs[:, 0], diffs[:, 1])
+        total_len = float(np.sum(seg_lens))
 
-            if v_rel_sq > 1e-4:
-                tcpa_cand = -(dx * dvx + dy * dvy) / v_rel_sq
-                if tcpa_cand > 0.0:
-                    dcpa_cand = np.hypot(dx + dvx * tcpa_cand, dy + dvy * tcpa_cand)
-                else:
-                    dcpa_cand = np.hypot(dx, dy)
-            else:
-                dcpa_cand = np.hypot(dx, dy)
+        s_start = 0.0
+        min_d = float('inf')
+        accum = 0.0
+        for i in range(len(seg_lens)):
+            v = pos[:2] - wps[i, :2]
+            u_vec = diffs[i] / max(seg_lens[i], 1e-4)
+            proj = max(0.0, min(float(np.dot(v, u_vec)), seg_lens[i]))
+            pt = wps[i, :2] + u_vec * proj
+            dist = float(np.linalg.norm(pos[:2] - pt))
+            if dist < min_d:
+                min_d = dist
+                s_start = accum + proj
+            accum += seg_lens[i]
 
-            if dcpa_cand >= (VesselParams.R_lateral + VesselParams.B):
-                best_chi = chi
-                break
+        traj = np.zeros((steps, 2))
+        for k in range(steps):
+            s = min(s_start + speed * k * dt, total_len)
+            accum_dist = 0.0
+            pt = wps[-1, :2]
+            for i, seg_len in enumerate(seg_lens):
+                if accum_dist + seg_len >= s:
+                    ratio = (s - accum_dist) / max(seg_len, 1e-4)
+                    pt = wps[i, :2] + ratio * diffs[i]
+                    break
+                accum_dist += seg_len
+            traj[k] = pt
 
-        return float(best_chi)
+        return traj, s_start
 
     @classmethod
     def evaluate(
@@ -82,154 +105,172 @@ class DecisionLayer:
         w_ts_delayed: Optional[np.ndarray],
         dcpa: float,
         tcpa: float,
+        u_nominal: float = 0.45,
     ) -> Tuple[np.ndarray, float, str]:
-        logger = rclpy.logging.get_logger("DecisionLayer")
-
         if x_ts is None:
+            cls._mode_a_active = False
+            cls._mode_b_active = False
+            cls._w_evasive_latched = None
             return np.copy(w_os), 0.0, "STAND_ON"
 
+        if x_os[3] < 0.20 or x_ts[3] < 0.20:
+            cls._mode_a_active = False
+            cls._mode_b_active = False
+            cls._w_evasive_latched = None
+            return np.copy(w_os), 0.0, "State B.2"
+
+        d_safe = VesselParams.DCPA_safe
+        curr_dist = float(np.hypot(x_os[0] - x_ts[0], x_os[1] - x_ts[1]))
+
         # ----------------------------------------------------------------------
-        # Mode A: Collaborative Shared Intent (Route Available)
+        # Mode A: Shared Intent Route Available
         # ----------------------------------------------------------------------
         if w_ts_delayed is not None and len(w_ts_delayed) >= 2:
-            cls._mode_b_active = False
+            # 1. Cross-Track Error relative to original nominal mission
+            # For a straight North track (x along North, y cross-track):
+            e_cte = abs(x_os[1] - w_os[0, 1])
 
-            # If active corridor is already executing, track it until passed
-            if cls._mode_a_active and cls._w_latched is not None:
-                if x_os[0] >= cls._w_latched[2, 0]:
-                    return np.copy(w_os), 0.0, "State A.2"
-                return cls._w_latched, 0.0, "State A.1"
+            # If the ship was evading and has returned close to the nominal line,
+            # OR if vessels are past CPA, stay strictly in State A.2
+            has_passed_cpa = tcpa < 0.0
+            is_back_on_route = e_cte < 0.35 and (
+                cls._mode_a_active or cls._mode_b_active
+            )
 
-            # Setup forward trajectory projection (Akdağ ship_trajectory)
-            u_os = max(x_os[3], 0.45)
-            u_ts = max(x_ts[3], 0.45)
-            hor_time = 70.0
-            dt_sim = 1.0
-            steps = int(hor_time / dt_sim)
-
-            # Target vessel planned trajectory forward integration
-            ts_traj = np.zeros((steps, 2))
-            diffs = np.diff(w_ts_delayed[:, :2], axis=0)
-            seg_lengths = np.hypot(diffs[:, 0], diffs[:, 1])
-            total_route_len = np.sum(seg_lengths)
-
-            for k in range(steps):
-                s = min(u_ts * k * dt_sim, total_route_len)
-                accum = 0.0
-                pt = w_ts_delayed[-1, :2]
-                for seg_idx, length in enumerate(seg_lengths):
-                    if accum + length >= s:
-                        ratio = (s - accum) / max(length, 1e-4)
-                        pt = w_ts_delayed[seg_idx, :2] + ratio * diffs[seg_idx]
-                        break
-                    accum += length
-                ts_traj[k] = pt
-
-            d_safe = VesselParams.DCPA_safe
-
-            # ------------------------------------------------------------------
-            # Gate: Evaluate Nominal Track (chi = 0.0) first
-            # ------------------------------------------------------------------
-            vx_nom = u_os * np.cos(x_os[2])
-            vy_nom = u_os * np.sin(x_os[2])
-            os_nom_x = x_os[0] + vx_nom * np.arange(steps) * dt_sim
-            os_nom_y = x_os[1] + vy_nom * np.arange(steps) * dt_sim
-            nom_dists = np.hypot(os_nom_x - ts_traj[:, 0], os_nom_y - ts_traj[:, 1])
-            nom_min_dist = float(np.min(nom_dists))
-
-            # If nominal track maintains safe separation, stay on original route
-            if nom_min_dist >= d_safe:
+            if has_passed_cpa or (is_back_on_route and curr_dist > (d_safe * 1.2)):
+                cls._mode_a_active = False
+                cls._mode_b_active = False
+                cls._w_evasive_latched = None
                 return np.copy(w_os), 0.0, "State A.2"
 
-            # ------------------------------------------------------------------
-            # Conflict detected: Optimize evasive action (Eq. 3.33 - 3.41)
-            # ------------------------------------------------------------------
-            cls._mode_a_active = True
-            t_start = time.perf_counter()
+          # 2. Maintain active evasive route while clearing
+            if cls._mode_a_active and cls._w_evasive_latched is not None:
+                # Release condition: OS has passed TS longitudinally or CPA has cleared
+                if (tcpa < -1.0 and curr_dist > (d_safe * 1.3)) or (tcpa < -15.0):
+                    cls._mode_a_active = False
+                    cls._w_evasive_latched = None
+                    return np.copy(w_os), 0.0, "State A.2"
+                return cls._w_evasive_latched, 0.0, "State A.1"
 
-            chi_candidates = np.radians(np.array(
-                [-75.0, -60.0, -45.0, -30.0, -15.0, 0.0, 15.0, 30.0, 45.0, 60.0, 75.0]
-            ))
+            cls._mode_b_active = False
 
+            u_os = float(x_os[3]) if abs(x_os[3]) > 0.05 else float(u_nominal)
+            u_ts = float(x_ts[3]) if abs(x_ts[3]) > 0.05 else float(u_nominal)
+            hor_time = 70.0
+            dt_sim = 0.5
+            steps = int(hor_time / dt_sim)
+
+            # Sample TS along broadcast intent route
+            ts_traj, _ = cls._sample_route(w_ts_delayed, x_ts[:2], u_ts, steps, dt_sim)
+
+            # 2. Build the OS active trajectory from CURRENT PHYSICAL POSITION
+            # Find downstream mission waypoints strictly ahead of OS current position
+            diffs_os = np.diff(w_os[:, :2], axis=0)
+            downstream_indices = []
+            for i in range(len(w_os) - 1):
+                seg_dir = diffs_os[i]
+                v_to_wp = w_os[i + 1, :2] - x_os[:2]
+                if np.dot(seg_dir, v_to_wp) > 1.0:
+                    downstream_indices.append(i + 1)
+
+            if len(downstream_indices) > 0:
+                unsailed_wps = w_os[downstream_indices[0]:, :2]
+            else:
+                unsailed_wps = w_os[-1:, :2]
+
+            # Active baseline: Live position -> Unsailed waypoints
+            w_os_base = np.vstack([x_os[:2], unsailed_wps])
+
+            # Sample rollout along this live-anchored route
+            os_traj, s_os = cls._sample_route(w_os_base, x_os[:2], u_os, steps, dt_sim)
+            dists = np.hypot(os_traj[:, 0] - ts_traj[:, 0], os_traj[:, 1] - ts_traj[:, 1])
+            k_cpa = int(np.argmin(dists))
+            min_dist = float(dists[k_cpa])
+
+            # If already clear of TS, smoothly track to the remaining mission waypoints
+            if min_dist >= (d_safe * 1.35) and curr_dist > (d_safe * 1.4):
+                return np.copy(w_os), 0.0, "State A.2"
+
+            # 3. Optimize passing direction with Akdag cost function
             best_cost = float("inf")
-            best_chi = None
-            best_min_dist = 0.0
-
-            for chi in chi_candidates:
-                psi_cand = x_os[2] + chi
-                vx = u_os * np.cos(psi_cand)
-                vy = u_os * np.sin(psi_cand)
-
-                os_traj_x = x_os[0] + vx * np.arange(steps) * dt_sim
-                os_traj_y = x_os[1] + vy * np.arange(steps) * dt_sim
-                dists = np.hypot(os_traj_x - ts_traj[:, 0], os_traj_y - ts_traj[:, 1])
-                min_dist = float(np.min(dists))
-
-                if min_dist <= d_safe:
-                    j_safety = 1000.0 * ((d_safe / max(min_dist, 0.05)) ** 4.0)
-                else:
-                    j_safety = 50.0 * (d_safe / min_dist)
-
-                k_weight = cls.k_chi_port if chi < 0.0 else cls.k_chi_stb
-                j_control = k_weight * (chi ** 2)
-
-                cost = j_safety + j_control
-
+            best_chi = 0.0
+            for chi in cls.chi_candidates:
+                cost, _, _ = cls._evaluate_candidate_hazard(x_os, chi, ts_traj, steps, dt_sim, d_safe)
                 if cost < best_cost:
                     best_cost = cost
                     best_chi = chi
-                    best_min_dist = min_dist
 
-            if best_chi is None or abs(best_chi) < 1e-4:
-                cls._mode_a_active = False
-                return np.copy(w_os), 0.0, "State A.2"
+            # Starboard (+1) vs Port (-1) normal displacement
+            lat_sign = 1.0 if best_chi <= 0.0 else -1.0
+            req_offset = lat_sign * max(d_safe * 1.4, 1.8)
 
-            # Generate 4-point evasion corridor
-            lat_sign = -1.0 if best_chi < 0.0 else 1.0
-            y_corridor = x_os[1] + (lat_sign * 2.0 * d_safe)
+            # Conflict point on the active live route
+            P_cpa = os_traj[k_cpa]
 
-            wp_start = np.array([x_os[0], x_os[1]])
-            wp_evade = np.array([x_os[0] + 6.0, y_corridor])
-            wp_pass = np.array([12.0, y_corridor])
-            wp_end = w_os[-1, :].copy()
+            # Vector of active segment at CPA
+            diffs_base = np.diff(w_os_base[:, :2], axis=0)
+            seg_lens_base = np.hypot(diffs_base[:, 0], diffs_base[:, 1])
+            s_cpa = s_os + (u_os * k_cpa * dt_sim)
 
-            cls._w_latched = np.vstack([wp_start, wp_evade, wp_pass, wp_end])
+            accum = 0.0
+            cpa_seg_idx = 0
+            for idx, length in enumerate(seg_lens_base):
+                if accum + length >= s_cpa:
+                    cpa_seg_idx = idx
+                    break
+                accum += length
 
-            t_comp_ms = (time.perf_counter() - t_start) * 1000.0
-            logger.info(
-                f"\n===================================================\n"
-                f"[DecisionLayer] FIRST EVASIVE ROUTE GENERATED:\n"
-                f"  Computation Time : {t_comp_ms:.4f} ms\n"
-                f"  Optimal chi*     : {np.degrees(best_chi):+.1f} deg\n"
-                f"  Min Distance     : {best_min_dist:.2f} m\n"
-                f"  Total Cost       : {best_cost:.2f}\n"
-                f"===================================================\n"
-            )
+            seg_dir = diffs_base[cpa_seg_idx] / max(seg_lens_base[cpa_seg_idx], 1e-4)
+            n_stb = np.array([-seg_dir[1], seg_dir[0]])
 
-            return cls._w_latched, 0.0, "State A.1"
+            # 4. Enforce the "No-Backtrack" safety invariant:
+            # If OS is already displaced to Starboard, W_evade must never be closer to the center than current position!
+            W_evade = P_cpa + req_offset * n_stb
+            if x_os[1] > 0.5 and W_evade[1] < x_os[1]:
+                W_evade[1] = x_os[1] + 0.5  # Maintain/expand current clearance
+            elif x_os[1] < -0.5 and W_evade[1] > x_os[1]:
+                W_evade[1] = x_os[1] - 0.5
+
+            # 5. Assemble and LATCH evasive route
+            rejoin_idx = min(cpa_seg_idx + 1, len(w_os_base) - 1)
+            remaining_wps = w_os_base[rejoin_idx:, :2]
+
+            cls._w_evasive_latched = np.vstack([x_os[:2], W_evade, remaining_wps])
+            cls._mode_a_active = True
+            return cls._w_evasive_latched, 0.0, "State A.1"
 
         # ----------------------------------------------------------------------
-        # Mode B: Uncollaborative Reactive Fallback (No Intent)
+        # Mode B: Reactive Fallback (No Intent)
         # ----------------------------------------------------------------------
         cls._mode_a_active = False
-        cls._w_latched = None
+        cls._w_evasive_latched = None
 
         domain_breached, _ = RiskCalculator.check_ship_domain_breach(x_os, x_ts)
-        threshold_cpa = VesselParams.R_lateral + VesselParams.B
+        threshold_cpa = max(d_safe * 1.15, VesselParams.R_lateral + VesselParams.B)
         cpa_risk = (dcpa < threshold_cpa) and (0.0 <= tcpa <= VesselParams.TCPA_safe)
         risk_active = cpa_risk or domain_breached
 
         if cls._mode_b_active:
-            if x_os[0] > (x_ts[0] + 1.0) or (tcpa <= 0.0 and dcpa >= threshold_cpa):
+            if tcpa <= 0.0 and dcpa >= threshold_cpa:
                 cls._mode_b_active = False
         else:
-            if risk_active and (x_ts[0] > x_os[0]):
+            if risk_active:
                 cls._mode_b_active = True
 
         if cls._mode_b_active:
             beta = RiskCalculator.calculate_relative_bearing(x_os, x_ts)
             scenario = RiskCalculator.classify_colreg_scenario(beta)
-            psi_ca = cls.evaluate_reactive_offset(x_os, x_ts, scenario)
-            return np.copy(w_os), psi_ca, "State B.1"
+
+            urgency = np.clip((d_safe - dcpa) / max(d_safe, 1e-3), 0.0, 1.0)
+            psi_headon = np.radians(30.0 + (60.0 - 30.0) * urgency)
+
+            if scenario == "Head-On":
+                psi_ca = psi_headon
+            elif scenario in ["Crossing_A", "Crossing_B"]:
+                psi_ca = np.radians(45.0)
+            else:
+                psi_ca = np.radians(30.0)
+
+            return np.copy(w_os), float(psi_ca), "State B.1"
 
         return np.copy(w_os), 0.0, "State B.2"

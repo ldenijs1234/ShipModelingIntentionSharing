@@ -23,14 +23,14 @@ CASE03_CONFIG = {
     # Target Ship (Magenta / Red) Configuration
     # -------------------------------------------------------------------------
     # Initial state: [x, y, psi, u, v, r]
-    # Starts East at x = -1.0 m, y = 20.0 m, heading West (psi = -pi/2 rad)
-    "ts_initial_state": np.array([-1.0, 20.0, -np.pi / 2.0, 0.45, 0.0, 0.0], dtype=np.float64),
+    # Starts East at x = 0.0 m, y = 22.0 m, heading West (psi = -pi/2 rad)
+    "ts_initial_state": np.array([0.0, 22.0, -np.pi / 2.0, 0.45, 0.0, 0.0], dtype=np.float64),
     "ts_nominal_speed": 0.45,  # [m/s]
-    # TS route: Crosses west from y = 20.0 m to y = 2.0 m, then turns North along east lane
+    # TS route: Crosses west from y = 22.0 m to y = 2.5 m, then turns North along east lane
     "ts_mission_wps": np.array([
-        [-1.0, 20.0],
-        [-1.0,  2.0],
-        [25.0,  2.0]
+        [0.0, 22.0],
+        [0.0,  2.5],
+        [25.0,  2.5]
     ], dtype=np.float64),
 
     # -------------------------------------------------------------------------
