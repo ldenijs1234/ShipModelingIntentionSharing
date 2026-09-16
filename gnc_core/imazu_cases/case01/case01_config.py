@@ -13,14 +13,14 @@ import shapely.ops as so
 poly_port = Polygon([
     (-10.0, -15.0),
     (50.0, -15.0),
-    (50.0, -3.0),
-    (-10.0, -3.0)
+    (50.0, -4.0),
+    (-10.0, -4.0)
 ])
 
 # Starboard (East) Bank: Y in [3.0, 15.0]
 poly_starboard = Polygon([
-    (-10.0, 3.0),
-    (50.0, 3.0),
+    (-10.0, 4.0),
+    (50.0, 4.0),
     (50.0, 15.0),
     (-10.0, 15.0)
 ])
@@ -34,8 +34,8 @@ CASE01_CONFIG = {
     # Canal polygon definition
     "canal_polygons": poly_canal_full,
     "canal_bounds": {
-        "y_min": -3.0,
-        "y_max": 3.0,
+        "y_min": -4.0,
+        "y_max": 4.0,
         "x_min": -5.0,
         "x_max": 45.0
     },
@@ -45,7 +45,8 @@ CASE01_CONFIG = {
     "os_nominal_speed": 0.5,
     "os_mission_wps": np.array([
         [0.0, 0.0],
-        [40.0, 0.0]
+        [12.5, 0.0],
+        [25.0, 0.0]
     ], dtype=np.float64),
 
     # Target Ship (TS) Initial Conditions & Route

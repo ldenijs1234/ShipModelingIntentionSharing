@@ -20,6 +20,7 @@ class SynchronousPipeline:
         cached: Dict[str, Any],
         dt: float = 0.1,       # Default strictly to 10 Hz
         u_nominal: float = 0.5,
+        canal_polygons = None
     ) -> Tuple[np.ndarray, Dict[str, Any], Dict[str, Any]]:
         
         # 1. State Estimation (10 Hz)
@@ -28,30 +29,51 @@ class SynchronousPipeline:
 
         # 2. Risk & Decision (10 Hz)
         cached["dcpa"], cached["tcpa"] = RiskCalculator.calculate_cpa(x_os, x_ts)
-        
+
+        prev_state = cached.get("state", "State B.2")
+        prev_route_len = len(cached.get("w_active", w_mission_os))
+
         # Unpack the 4 returned values, including the speed multiplier 'p_ca'
         cached["w_active"], cached["psi_ca"], cached["p_ca"], cached["state"] = DecisionLayer.evaluate(
-            x_os, x_ts, w_mission_os, w_ts_delayed, cached["dcpa"], cached["tcpa"], u_nominal,
+            x_os, x_ts, w_mission_os, w_ts_delayed, cached["dcpa"], cached["tcpa"], u_nominal, canal_polygons
         )
+
+        # Re-anchor downstream waypoint index upon state transitions
+        if prev_state == "State B.1" and cached["state"] == "State B.2":
+            # Rejoin nearest unsailed segment ahead along the nominal mission
+            best_idx = len(w_mission_os) - 1
+            for idx in range(len(w_mission_os) - 1):
+                seg_vec = w_mission_os[idx + 1, :2] - w_mission_os[idx, :2]
+                v_ship = x_os[:2] - w_mission_os[idx, :2]
+                seg_len = float(np.hypot(seg_vec[0], seg_vec[1]))
+                proj = float(np.dot(v_ship, seg_vec)) / max(seg_len, 1e-4)
+
+                if proj < seg_len:
+                    best_idx = idx + 1
+                    break
+            cached["wp_idx"] = max(1, best_idx)
+        elif cached["state"] == "State A.1" and prev_state != "State A.1":
+            cached["wp_idx"] = 1
+        elif len(cached["w_active"]) != prev_route_len:
+            cached["wp_idx"] = 1
 
         # 3. Guidance Layer
         cached["psi_wp"], _, cached["wp_idx"] = LOSGuidance.compute_heading_reference(
-            x_os, cached["w_active"], cached.get("wp_idx", 0)
+            x_os, cached["w_active"], cached.get("wp_idx", 1)
         )
 
-        # In State B.1, base heading command on nominal track direction (pi_p)
+        # In State B.1, base heading command on active segment track direction (pi_p)
         # rather than allowing cross-track error to cancel out psi_ca
         if cached["state"] == "State B.1":
-            # Nominal track bearing from mission waypoints (e.g. 0.0 rad for due North)
-            p_start = w_mission_os[0]
-            p_end = w_mission_os[-1]
+            active_idx = max(1, min(cached.get("wp_idx", 1), len(w_mission_os) - 1))
+            p_start = w_mission_os[active_idx - 1]
+            p_end = w_mission_os[active_idx]
             pi_p = float(np.arctan2(p_end[1] - p_start[1], p_end[0] - p_start[0]))
             psi_guidance_ref = pi_p
         else:
             psi_guidance_ref = cached["psi_wp"]
 
         # 4. Control Layer (Eq. 3.42: psi_cmd = psi_ref + psi_ca)
-        # Apply the speed multiplier dynamically determined by the DecisionLayer
         target_speed = float(u_nominal * cached.get("p_ca", 1.0))
         
         u_c, tau_c, psi_cmd = Autopilot.compute_control(

@@ -69,7 +69,6 @@ def run_dynamic_batch(log_dir=None, d_safe=VesselParams.DCPA_safe):
   runs = []
   for f in npz_files:
     data = np.load(f, allow_pickle=True)
-    # Read metadata stored inside file, with fallbacks
     scenario = str(data["scenario"]) if "scenario" in data else "unknown"
     mode = str(data["mode"]) if "mode" in data else "RA"
     latency = float(data["latency"]) if "latency" in data else 0.0
@@ -84,9 +83,8 @@ def run_dynamic_batch(log_dir=None, d_safe=VesselParams.DCPA_safe):
         "data": data,
     })
 
-  # 2. Group by scenario (e.g. 'case01', 'case02', 'case03')
+  # 2. Group and evaluate per scenario
   scenarios = sorted(list(set(r["scenario"] for r in runs)))
-  all_results = []
 
   for sc in scenarios:
     sc_runs = [r for r in runs if r["scenario"] == sc]
@@ -97,11 +95,14 @@ def run_dynamic_batch(log_dir=None, d_safe=VesselParams.DCPA_safe):
       print(f"[{sc}] Skipping: No baseline RA run found.")
       continue
 
-    # Use first available RA baseline for this scenario
     ra_entry = ra_runs[0]
     nominal_wps = ra_entry["data"]["nominal_wps"]
     evaluator = ScenarioKPIEvaluator(
-        d_safe=d_safe, nominal_waypoints=nominal_wps, w_cte=0.7, w_ctrl=0.3
+        d_safe=d_safe,
+        nominal_waypoints=nominal_wps,
+        w_cte=0.5,
+        w_ctrl=0.25,
+        w_speed=0.25,
     )
 
     kpi_ra = evaluator.evaluate_single_run(
@@ -112,60 +113,61 @@ def run_dynamic_batch(log_dir=None, d_safe=VesselParams.DCPA_safe):
         ra_entry["data"]["ts_pos"],
     )
 
-    # Evaluate each IS run against the RA baseline
+    sc_results = []
     for is_entry in is_runs:
       kpi_is = evaluator.evaluate_single_run(
-          is_entry["data"]["t"],
-          is_entry["data"]["os_pos"],
-          is_entry["data"]["os_psi"],
-          is_entry["data"]["os_r"],
-          is_entry["data"]["ts_pos"],
+        is_entry["data"]["t"],
+        is_entry["data"]["os_pos"],
+        is_entry["data"]["os_psi"],
+        is_entry["data"]["os_r"],
+        is_entry["data"]["ts_pos"],
       )
       comp = evaluator.evaluate_comparison(kpi_ra, kpi_is)
 
-      all_results.append({
+      sc_results.append({
           "scenario": sc,
           "interval": is_entry["interval"],
           "latency": is_entry["latency"],
           "r_min": kpi_is["r_min"],
           "status": comp["status"],
-          "norm_ctrl": comp.get("norm_ctrl", float('inf')),
-          "norm_cte": comp.get("norm_cte", float('inf')),
-          "j_total_is": comp.get("j_total_is", float('inf')),
-          "delta_j": comp.get("delta_j", float('inf')),
+          "norm_ctrl": comp.get("norm_ctrl", float("inf")),
+          "norm_cte": comp.get("norm_cte", float("inf")),
+          "norm_spd": comp.get("norm_speed", float("inf")),
+          "j_total_is": comp.get("j_total_is", float("inf")),
+          "delta_j": comp.get("delta_j", float("inf")),
           "delta_j_pct": comp.get("delta_j_pct", 0.0),
       })
 
-  # 3. Display summary DataFrame
-    if not all_results:
-      print("No paired IS vs. RA runs found.")
-      return
+    if not sc_results:
+      print(f"[{sc}] No IS runs found to pair with RA baseline.")
+      continue
 
-    df = pd.DataFrame(all_results)
-
-    # Sort numerically by scenario, update interval, and latency
-    df = df.sort_values(
-        by=["scenario", "interval", "latency"], ascending=[True, True, True]
+    # Build and sort DataFrame strictly for the current scenario
+    df_sc = pd.DataFrame(sc_results)
+    df_sc["latency"] = df_sc["latency"].astype(float)
+    df_sc["interval"] = df_sc["interval"].astype(float)
+    df_sc = df_sc.sort_values(
+        by=["interval", "latency"], ascending=[True, True]
     ).reset_index(drop=True)
 
-    print("\n================ BATCH EVALUATION SUMMARY ================")
+    print(f"\n================ BATCH SUMMARY: {sc.upper()} ================")
     print(
-        df[[
+        df_sc[[
             "scenario",
+            "interval",
             "latency",
             "r_min",
             "norm_ctrl",
             "norm_cte",
+            "norm_spd",
             "delta_j",
             "delta_j_pct",
         ]].to_string(index=False)
     )
 
-  # 4. Generate tipping curve per scenario
-  for sc in scenarios:
-    sc_df = df[df["scenario"] == sc]
-    if len(sc_df) > 1:
-      plot_summary_latency_curve(sc_df, sc)
+    # Generate tipping curve per scenario if multiple runs exist
+    if len(df_sc) > 1:
+      plot_summary_latency_curve(df_sc, sc)
 
 
 if __name__ == "__main__":

@@ -13,15 +13,33 @@ class LOSGuidance:
         if num_wps < 2:
             return float(x_os[2]), 0.0, current_wp_idx
 
-        idx = min(current_wp_idx, num_wps - 1)
+        # Enforce valid segment index (at least 1 for w_active[idx - 1] to exist)
+        idx = max(1, min(current_wp_idx, num_wps - 1))
         wp_prev = w_active[idx - 1]
         wp_curr = w_active[idx]
 
-        # Waypoint switching via circle of acceptance D_m
-        dist_to_wp = np.sqrt((wp_curr[0] - x_os[0])**2 + (wp_curr[1] - x_os[1])**2)
-        if dist_to_wp < VesselParams.D_m and idx < (num_wps - 1):
+        # -------------------------------------------------------------
+        # Waypoint Switching Logic (Distance + Along-Track Overflight)
+        # -------------------------------------------------------------
+        leg_vec = wp_curr[:2] - wp_prev[:2]
+        leg_len = float(np.hypot(leg_vec[0], leg_vec[1]))
+        u_leg = leg_vec / max(leg_len, 1e-4)
+
+        # Vector from target waypoint to vessel position
+        v_to_os = x_os[:2] - wp_curr[:2]
+        dist_to_wp = float(np.hypot(v_to_os[0], v_to_os[1]))
+
+        # Condition 1: Vessel is within circular acceptance zone
+        reached_dist = dist_to_wp <= VesselParams.D_m
+
+        # Condition 2: Vessel crossed the orthogonal boundary of the waypoint
+        passed_wp = (np.dot(v_to_os, u_leg) > 0.0) and (dist_to_wp < (VesselParams.D_m * 3.5))
+
+        # Advance to downstream waypoint if not already at the terminal waypoint
+        if (reached_dist or passed_wp) and (idx < num_wps - 1):
             idx += 1
-            wp_prev, wp_curr = w_active[idx - 1], w_active[idx]
+            wp_prev = w_active[idx - 1]
+            wp_curr = w_active[idx]
 
         # Track orientation angle psi_trk
         dx = wp_curr[0] - wp_prev[0]

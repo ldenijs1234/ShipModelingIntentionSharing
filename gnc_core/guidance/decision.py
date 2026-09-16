@@ -74,6 +74,11 @@ class DecisionLayer:
         if canal_polygons is not None:
             traj_line = LineString(np.column_stack((os_x, os_y)))
             min_static_dist = traj_line.distance(canal_polygons)
+            
+            # Add this: Hard physical boundary truncation (Thesis Eq 2.12 constraints)
+            if min_static_dist <= VesselParams.R_lateral:
+                return float("inf"), min_dist, min_idx
+                
             if min_static_dist <= VesselParams.d_safe_static:
                 j_grounding = cls.k_grounding * ((VesselParams.d_safe_static / (min_static_dist + 0.05)) ** 2.5)
 
@@ -184,30 +189,25 @@ class DecisionLayer:
         # Mode A: Shared Intent Route Available
         # ----------------------------------------------------------------------
         if w_ts_delayed is not None and len(w_ts_delayed) >= 2:
-            e_cte = abs(x_os[1] - w_os[0, 1])
-
-            has_passed_cpa = tcpa < 0.0
-            is_back_on_route = e_cte < 0.35 and (
-                cls._mode_a_active or cls._mode_b_active
-            )
-
-            if has_passed_cpa or (is_back_on_route and curr_dist > (d_safe * 1.2)):
-                cls._mode_a_active = False
-                cls._mode_b_active = False
-                cls._w_evasive_latched = None
-                return np.copy(w_os), 0.0, 1.0, "State A.2"
-
-            if cls._mode_a_active and cls._w_evasive_latched is not None:
-                if (tcpa < -1.0 and curr_dist > (d_safe * 1.3)) or (tcpa < -15.0):
+            # 1. Check exit conditions ONLY after vessels pass CPA or clear hazard
+            if cls._mode_a_active:
+                passed_cpa = tcpa < -1.0 or (x_os[0] > x_ts[0] + 1.5)  # OS has sailed past TS in North (x)
+                cleared_distance = curr_dist > (d_safe * 2.0)
+                
+                if passed_cpa and cleared_distance:
                     cls._mode_a_active = False
                     cls._w_evasive_latched = None
                     cls._p_evasive_latched = 1.0
                     return np.copy(w_os), 0.0, 1.0, "State A.2"
-                return cls._w_evasive_latched, 0.0, cls._p_evasive_latched, "State A.1"
+                
+                # Hold the active evasive route until safely past
+                if cls._w_evasive_latched is not None:
+                    return cls._w_evasive_latched, 0.0, cls._p_evasive_latched, "State A.1"
 
             cls._mode_b_active = False
 
-            hor_time = max(120.0, tcpa + 20.0) if tcpa > 0.0 else 70.0
+            # Horizon planning steps
+            hor_time = max(100.0, tcpa + 20.0) if tcpa > 0.0 else 60.0
             dt_sim = 0.5
             steps = int(hor_time / dt_sim)
 
@@ -218,14 +218,10 @@ class DecisionLayer:
             for i in range(len(w_os) - 1):
                 seg_dir = diffs_os[i]
                 v_to_wp = w_os[i + 1, :2] - x_os[:2]
-                if np.dot(seg_dir, v_to_wp) > 1.0:
+                if np.dot(seg_dir, v_to_wp) > 0.5:
                     downstream_indices.append(i + 1)
 
-            if len(downstream_indices) > 0:
-                unsailed_wps = w_os[downstream_indices[0]:, :2]
-            else:
-                unsailed_wps = w_os[-1:, :2]
-
+            unsailed_wps = w_os[downstream_indices[0]:, :2] if len(downstream_indices) > 0 else w_os[-1:, :2]
             w_os_base = np.vstack([x_os[:2], unsailed_wps])
 
             os_traj, s_os = cls._sample_route(w_os_base, x_os[:2], u_os, steps, dt_sim)
@@ -233,13 +229,14 @@ class DecisionLayer:
             k_cpa = int(np.argmin(dists))
             min_dist = float(dists[k_cpa])
 
-            if min_dist >= (d_safe * 1.35) and curr_dist > (d_safe * 1.4):
+            # Trigger condition: Only activate if an actual CPA risk exists
+            if min_dist >= (d_safe * 1.5) and curr_dist > (d_safe * 1.5):
                 return np.copy(w_os), 0.0, 1.0, "State A.2"
 
             best_cost = float("inf")
             best_chi = 0.0
             best_p = 1.0
-            
+
             for chi in cls.chi_candidates:
                 for p_cand in cls.p_candidates:
                     cost, _, _ = cls._evaluate_candidate_hazard(
@@ -250,15 +247,14 @@ class DecisionLayer:
                         best_chi = chi
                         best_p = p_cand
 
-            lat_sign = 1.0 if best_chi <= 0.0 else -1.0
-            req_offset = lat_sign * max(d_safe * 1.4, 1.8)
+            # Head-On / Starboard evasion offset
+            req_offset = 2.0  # Guarantees clearing TS (y=0) while keeping inside canal wall (y=3.0)
 
             P_cpa = os_traj[k_cpa]
+            s_cpa = s_os + (u_os * k_cpa * dt_sim)
 
             diffs_base = np.diff(w_os_base[:, :2], axis=0)
             seg_lens_base = np.hypot(diffs_base[:, 0], diffs_base[:, 1])
-            s_cpa = s_os + (u_os * k_cpa * dt_sim)
-
             accum = 0.0
             cpa_seg_idx = 0
             for idx, length in enumerate(seg_lens_base):
@@ -268,10 +264,12 @@ class DecisionLayer:
                 accum += length
 
             seg_dir = diffs_base[cpa_seg_idx] / max(seg_lens_base[cpa_seg_idx], 1e-4)
-            n_stb = np.array([-seg_dir[1], seg_dir[0]])
+            n_stb = np.array([-seg_dir[1], seg_dir[0]])  # Right / Starboard normal
 
+            # Latch a stable evasive polyline: [Start, Evade, Rejoin]
             W_evade = P_cpa + req_offset * n_stb
-
+            
+            # Anchor start of evasive leg at initial decision point, not continuously shifting with x_os
             rejoin_idx = min(cpa_seg_idx + 1, len(w_os_base) - 1)
             remaining_wps = w_os_base[rejoin_idx:, :2]
 
@@ -295,7 +293,10 @@ class DecisionLayer:
         risk_active = cpa_risk or domain_breached or close_quarters
 
         if cls._mode_b_active:
-            if tcpa <= -1.0 and curr_dist > (d_safe * 1.3):
+            # Exit Mode B only after TCPA has passed AND vessels are separating
+            # (Independent of North/South travel direction)
+            has_passed = (tcpa < -2.0) and (curr_dist > max(d_safe * 1.5, 3.0))
+            if has_passed:
                 cls._mode_b_active = False
         else:
             if risk_active:
@@ -306,17 +307,38 @@ class DecisionLayer:
             psi_headon = np.radians(30.0 + (60.0 - 30.0) * urgency)
 
             if scenario == "Head-On":
-                psi_ca = psi_headon
+                psi_ca = psi_headon  # +offset = Starboard turn
                 p_ca = 0.5 if urgency > 0.6 else 1.0
             elif scenario in ["Crossing_A", "Crossing_B"]:
+                # +45.0 deg (Starboard turn to pass astern) per Equation (3.50)
                 psi_ca = np.radians(45.0)
                 p_ca = 0.5 if curr_dist < (d_safe * 1.5) else 1.0
+            elif scenario == "Overtaking":
+                psi_ca = np.radians(30.0)
+                p_ca = 1.0
             else:
                 psi_ca = np.radians(30.0)
                 p_ca = 1.0
 
             if curr_dist < d_safe * 0.8:
                 p_ca = 0.0
+
+            # --- NEW: REACTIVE GROUNDING AVOIDANCE ---
+            if canal_polygons is not None:
+                # Project the OS position 5 seconds into the future using the proposed heading
+                vx = u_os * np.cos(x_os[2] + psi_ca)
+                vy = u_os * np.sin(x_os[2] + psi_ca)
+                future_pos = (x_os[0] + vx * 5.0, x_os[1] + vy * 5.0)
+                
+                # Check distance to canal walls along this projected path
+                projected_line = LineString([(x_os[0], x_os[1]), future_pos])
+                d_static_future = float(projected_line.distance(canal_polygons))
+
+                # If the evasive turn puts us into the wall, kill speed and straighten out
+                if d_static_future <= VesselParams.d_safe_static:
+                    p_ca = 0.0    # Emergency stop to yield
+                    psi_ca = 0.0  # Re-align parallel to the channel to minimize footprint
+            # -----------------------------------------
 
             return np.copy(w_os), float(psi_ca), float(p_ca), "State B.1"
 

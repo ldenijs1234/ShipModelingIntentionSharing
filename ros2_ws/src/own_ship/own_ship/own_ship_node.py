@@ -32,6 +32,8 @@ class OSTransceiverNode(Node):
 
         self.speed_factor = max(float(self.get_parameter('speed_factor').value), 0.1)
 
+        self.canal_polygons = config.get('canal_polygons', None)
+
         # Synchronized to 20 Hz (0.05 s) to match TS physics resolution
         self.dt = 0.05
         self.u_nominal = float(config['os_nominal_speed'])
@@ -74,6 +76,7 @@ class OSTransceiverNode(Node):
         self.hist_range = []
         self.hist_os_pos = []
         self.hist_ts_pos = []
+        self.hist_r = []
 
         self.cached = {
             "time": 0.0,
@@ -114,6 +117,10 @@ class OSTransceiverNode(Node):
         if self.x_ts_raw is None or self.sim_finished:
             return
 
+        # Guard against zero or uninitialized position from TS
+        if abs(self.x_ts_raw[0]) < 1e-4 and abs(self.x_ts_raw[1]) < 1e-4:
+            return
+
         # 1. Check if OS has reached the terminal waypoint
         target_wp = self.cached["w_active"][-1, :2]
         dist_to_final = np.linalg.norm(self.internal_state[:2] - target_wp)
@@ -130,7 +137,8 @@ class OSTransceiverNode(Node):
             w_ts_delayed=self.w_ts_delayed,
             cached=self.cached,
             dt=self.dt,
-            u_nominal=current_u_target
+            u_nominal=current_u_target,
+            canal_polygons=self.canal_polygons,
         )
 
         # Log state transition cleanly
@@ -138,9 +146,11 @@ class OSTransceiverNode(Node):
             self.get_logger().info(f"[OS] Transitioned to {self.cached['state']}")
 
         # 3. Compute instantaneous Range
-        current_range = float(np.linalg.norm(self.internal_state[:2] - self.x_ts_raw[:2]))
+        current_range = float(
+            np.linalg.norm(self.internal_state[:2] - self.x_ts_raw[:2])
+        )
 
-        # 4. Log data for analysis
+        # 4. Log data for analysis (including yaw rate r at index 3)
         sim_time = telemetry["time"]
         self.hist_time.append(sim_time)
         self.hist_dcpa.append(telemetry["dcpa"])
@@ -148,84 +158,110 @@ class OSTransceiverNode(Node):
         self.hist_range.append(current_range)
         self.hist_os_pos.append(self.internal_state[:2].copy())
         self.hist_ts_pos.append(self.x_ts_raw[:2].copy())
+        self.hist_r.append(float(self.internal_state[3]))
 
         # 5. Publish ROS topics
         os_msg = Float64MultiArray(data=telemetry["x_os"].tolist())
         self.os_state_pub.publish(os_msg)
 
-        w_msg = Float64MultiArray(data=self.cached["w_active"].flatten().tolist())
+        w_msg = Float64MultiArray(
+            data=self.cached["w_active"].flatten().tolist()
+        )
         self.w_active_pub.publish(w_msg)
 
-        telem_msg = Float64MultiArray(data=[
-            sim_time, telemetry["dcpa"], telemetry["tcpa"],
-            telemetry["u_c"], telemetry["tau_c"], telemetry["psi_cmd"]
-        ])
+        telem_msg = Float64MultiArray(
+            data=[
+                sim_time,
+                telemetry["dcpa"],
+                telemetry["tcpa"],
+                telemetry["u_c"],
+                telemetry["tau_c"],
+                telemetry["psi_cmd"],
+            ]
+        )
         self.telemetry_pub.publish(telem_msg)
 
-        # 6. Stop condition: both vessels have zero forward velocity
-        os_stopped = abs(self.internal_state[3]) < 0.05 and dist_to_final <= (VesselParams.D_m + 0.2)
+        # 6. Stop condition: internal_state[5] is surge speed u (index 3 is yaw rate r)
+        os_stopped = (
+            abs(self.internal_state[5]) < 0.05
+            and dist_to_final <= (VesselParams.D_m + 0.2)
+        )
+        # x_ts_raw is in Sensor format [X, Y, psi, u, v, r], so surge speed is index 3
         ts_stopped = abs(self.x_ts_raw[3]) < 0.05
-        
+
         if os_stopped and ts_stopped:
             self.sim_finished = True
-            self.get_logger().info("\033[92mBoth vessels arrived at terminal waypoints.\033[0m")
+            self.get_logger().info(
+                "\033[92mBoth vessels arrived at terminal waypoints.\033[0m"
+            )
             self.plot_encounter_metrics()
-
-            if self.auto_close:
-                sys.exit(0)
-            else:
-                # Once you manually close the figure window, cleanly terminate the launch
-                self.get_logger().info("Inspection window closed. Terminating scenario...")
-                sys.exit(0)
+            # Do not call sys.exit(0) here; live_plotter_node handles the display and exit
 
     
     def plot_encounter_metrics(self):
         t_arr = np.array(self.hist_time)
+        if len(t_arr) < 2:
+            return
+
         range_arr = np.array(self.hist_range)
+        dcpa_arr = np.array(self.hist_dcpa)
+        tcpa_arr = np.array(self.hist_tcpa)
 
-        # Retrieve saved trajectory coordinates from internal buffers
-        os_x = np.array([pt[0] for pt in self.hist_os_pos]) if hasattr(self, 'hist_os_pos') else np.zeros_like(t_arr)
-        os_y = np.array([pt[1] for pt in self.hist_os_pos]) if hasattr(self, 'hist_os_pos') else np.zeros_like(t_arr)
-        ts_x = np.array([pt[0] for pt in self.hist_ts_pos]) if hasattr(self, 'hist_ts_pos') else np.zeros_like(t_arr)
-        ts_y = np.array([pt[1] for pt in self.hist_ts_pos]) if hasattr(self, 'hist_ts_pos') else np.zeros_like(t_arr)
+        os_y = np.array([pt[1] for pt in self.hist_os_pos])
+        e_cte = np.abs(os_y)
+        j_cte_accum = np.cumsum(e_cte) * self.dt
 
-        fig, (ax1, ax2, ax3, ax4) = plt.subplots(4, 1, figsize=(10, 10), sharex=True)
-        fig.canvas.manager.set_window_title('Diagnostic: Telemetry vs Raw Coordinates')
+        r_arr = np.array(self.hist_r)
+        r_dot = np.gradient(r_arr, self.dt)
+        j_ctrl_accum = np.cumsum(r_dot**2) * self.dt
 
-        # 1. Range with spikes highlighted
-        ax1.plot(t_arr, range_arr, color='#1f77b4', linewidth=1.5, label='Range (m)')
-        ax1.set_ylabel('Range [m]')
-        ax1.grid(True, linestyle='--', alpha=0.5)
-        ax1.legend(loc='upper right')
+        fig, axes = plt.subplots(5, 1, figsize=(9, 11), sharex=True)
+        fig.canvas.manager.set_window_title("COLREGs Encounter & Performance Metrics")
 
-        # 2. Raw X positions (North)
-        ax2.plot(t_arr, os_x, label='OS X (North)', color='blue')
-        ax2.plot(t_arr, ts_x, label='TS X (Raw)', color='red', linestyle='--')
-        ax2.set_ylabel('North (X) [m]')
-        ax2.grid(True, linestyle='--', alpha=0.5)
-        ax2.legend(loc='upper right')
+        # 1. Instantaneous Separation Range
+        axes[0].plot(t_arr, range_arr, color="#1f77b4", linewidth=1.8, label="Range (m)")
+        axes[0].axhline(VesselParams.DCPA_safe, color="red", linestyle="--", label=f"Safe ({VesselParams.DCPA_safe} m)")
+        axes[0].set_ylabel("Range [m]")
+        axes[0].grid(True, linestyle=":", alpha=0.6)
+        axes[0].legend(loc="upper right", fontsize=8)
 
-        # 3. Raw Y positions (East)
-        ax3.plot(t_arr, os_y, label='OS Y (East)', color='blue')
-        ax3.plot(t_arr, ts_y, label='TS Y (Raw)', color='red', linestyle='--')
-        ax3.set_ylabel('East (Y) [m]')
-        ax3.grid(True, linestyle='--', alpha=0.5)
-        ax3.legend(loc='upper right')
+        # 2. DCPA
+        axes[1].plot(t_arr, dcpa_arr, color="#2ca02c", linewidth=1.8, label="DCPA (m)")
+        axes[1].axhline(VesselParams.DCPA_safe, color="red", linestyle="--", label="DCPA Safe")
+        axes[1].set_ylabel("DCPA [m]")
+        axes[1].grid(True, linestyle=":", alpha=0.6)
+        axes[1].legend(loc="upper right", fontsize=8)
 
-        # 4. Computed Distance Delta check
-        # |X_os - X_ts| and |Y_os - Y_ts|
-        dx = np.abs(os_x - ts_x)
-        dy = np.abs(os_y - ts_y)
-        ax4.plot(t_arr, dx, label='|X_OS - X_TS|', color='purple')
-        ax4.plot(t_arr, dy, label='|Y_OS - Y_TS|', color='darkorange')
-        ax4.set_ylabel('Separation [m]')
-        ax4.set_xlabel('Simulation Time [s]')
-        ax4.grid(True, linestyle='--', alpha=0.5)
-        ax4.legend(loc='upper right')
+        # 3. TCPA
+        axes[2].plot(t_arr, tcpa_arr, color="#ff7f0e", linewidth=1.8, label="TCPA (s)")
+        axes[2].axhline(0.0, color="gray", linestyle=":", label="TCPA = 0")
+        axes[2].set_ylabel("TCPA [s]")
+        axes[2].grid(True, linestyle=":", alpha=0.6)
+        axes[2].legend(loc="upper right", fontsize=8)
+
+        # 4. Instantaneous Yaw Rate
+        axes[3].plot(t_arr, np.degrees(r_arr), color="#9467bd", linewidth=1.6, label=r"Yaw Rate $r$ [deg/s]")
+        axes[3].set_ylabel(r"$r$ [deg/s]")
+        axes[3].grid(True, linestyle=":", alpha=0.6)
+        axes[3].legend(loc="upper right", fontsize=8)
+
+        # 5. Cross-Track Error & Cumulative Trajectory Penalty
+        axes[4].plot(t_arr, e_cte, color="#d62728", linewidth=1.6, label=r"Instantaneous $|e_{\mathrm{cte}}|$ [m]")
+        axes[4].plot(t_arr, j_cte_accum, color="#8c564b", linestyle="--", linewidth=1.4, label=r"Cumulative $J_{\mathrm{cte}}$ [m$\cdot$s]")
+        axes[4].set_ylabel(r"$e_{\mathrm{cte}}$ [m]")
+        axes[4].set_xlabel("Simulation Time [s]")
+        axes[4].grid(True, linestyle=":", alpha=0.6)
+        axes[4].legend(loc="upper right", fontsize=8)
 
         plt.tight_layout()
-        plt.show()
 
+        if self.auto_close:
+            os.makedirs("results_plots", exist_ok=True)
+            scenario_name = self.get_parameter("scenario").value
+            plt.savefig(f"results_plots/{scenario_name}_encounter_kpi.png", dpi=300)
+            plt.close(fig)
+        else:
+            plt.show()
 
 def main(args=None):
     rclpy.init(args=args)
