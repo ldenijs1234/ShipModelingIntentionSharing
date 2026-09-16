@@ -36,9 +36,19 @@ class OSTransceiverNode(Node):
         self.dt = 0.05
         self.u_nominal = float(config['os_nominal_speed'])
         self.w_mission_os = config['os_mission_wps'].copy()
-        self.internal_state = config['os_initial_state'].copy()
+        
+        # Map config [x, y, psi, u, v, r] to internal dynamics state [x, y, psi, r, b, u] (Thesis Section 3.1.1)
+        raw_state = config['os_initial_state']
+        self.internal_state = np.array([
+            raw_state[0],  # X
+            raw_state[1],  # Y
+            raw_state[2],  # psi
+            raw_state[5],  # r (yaw rate)
+            0.0,           # b (heading bias)
+            raw_state[3]   # u (surge velocity)
+        ], dtype=np.float64)
 
-        # [FIX 1/2]: Initialize previous heading memory for true yaw rate calculation
+        # Initialize previous heading memory for true yaw rate calculation
         self.prev_psi = float(self.internal_state[2])
 
         self.route_sub = self.create_subscription(
@@ -62,6 +72,8 @@ class OSTransceiverNode(Node):
         self.hist_dcpa = []
         self.hist_tcpa = []
         self.hist_range = []
+        self.hist_os_pos = []
+        self.hist_ts_pos = []
 
         self.cached = {
             "time": 0.0,
@@ -121,15 +133,6 @@ class OSTransceiverNode(Node):
             u_nominal=current_u_target
         )
 
-        # [FIX 2/2]: Manually reconstruct the true yaw rate to bypass the physics engine bug
-        # Calculate shortest angular distance to prevent wrap-around spikes
-        diff = (self.internal_state[2] - self.prev_psi + np.pi) % (2.0 * np.pi) - np.pi
-        true_r = diff / self.dt
-        self.prev_psi = self.internal_state[2]
-        
-        # Overwrite the bugged speed value at index 5 with the true yaw rate
-        self.internal_state[5] = true_r
-
         # Log state transition cleanly
         if self.cached["state"] != prev_state:
             self.get_logger().info(f"[OS] Transitioned to {self.cached['state']}")
@@ -143,9 +146,11 @@ class OSTransceiverNode(Node):
         self.hist_dcpa.append(telemetry["dcpa"])
         self.hist_tcpa.append(telemetry["tcpa"])
         self.hist_range.append(current_range)
+        self.hist_os_pos.append(self.internal_state[:2].copy())
+        self.hist_ts_pos.append(self.x_ts_raw[:2].copy())
 
         # 5. Publish ROS topics
-        os_msg = Float64MultiArray(data=self.internal_state.tolist())
+        os_msg = Float64MultiArray(data=telemetry["x_os"].tolist())
         self.os_state_pub.publish(os_msg)
 
         w_msg = Float64MultiArray(data=self.cached["w_active"].flatten().tolist())
@@ -176,64 +181,50 @@ class OSTransceiverNode(Node):
     
     def plot_encounter_metrics(self):
         t_arr = np.array(self.hist_time)
-        dcpa_arr = np.array(self.hist_dcpa)
-        tcpa_arr = np.array(self.hist_tcpa)
         range_arr = np.array(self.hist_range)
 
-        # Clamp large initial values for readability
-        dcpa_arr = np.clip(dcpa_arr, 0.0, 15.0)
-        tcpa_arr = np.clip(tcpa_arr, -10.0, 60.0)
+        # Retrieve saved trajectory coordinates from internal buffers
+        os_x = np.array([pt[0] for pt in self.hist_os_pos]) if hasattr(self, 'hist_os_pos') else np.zeros_like(t_arr)
+        os_y = np.array([pt[1] for pt in self.hist_os_pos]) if hasattr(self, 'hist_os_pos') else np.zeros_like(t_arr)
+        ts_x = np.array([pt[0] for pt in self.hist_ts_pos]) if hasattr(self, 'hist_ts_pos') else np.zeros_like(t_arr)
+        ts_y = np.array([pt[1] for pt in self.hist_ts_pos]) if hasattr(self, 'hist_ts_pos') else np.zeros_like(t_arr)
 
-        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(9, 8), sharex=True)
-        fig.canvas.manager.set_window_title('COLREGs Encounter Metrics Evaluation')
+        fig, (ax1, ax2, ax3, ax4) = plt.subplots(4, 1, figsize=(10, 10), sharex=True)
+        fig.canvas.manager.set_window_title('Diagnostic: Telemetry vs Raw Coordinates')
 
-        # 1. Range Subplot
-        ax1.plot(t_arr, range_arr, color='#1f77b4', linewidth=2.0, label='Range')
-        ax1.axhline(VesselParams.DCPA_safe, color='black', linestyle=':', label='Safe Boundary')
+        # 1. Range with spikes highlighted
+        ax1.plot(t_arr, range_arr, color='#1f77b4', linewidth=1.5, label='Range (m)')
         ax1.set_ylabel('Range [m]')
         ax1.grid(True, linestyle='--', alpha=0.5)
         ax1.legend(loc='upper right')
 
-        # 2. DCPA Subplot
-        ax2.plot(t_arr, dcpa_arr, color='#2ca02c', linewidth=2.0, label='DCPA')
-        ax2.axhline(VesselParams.DCPA_safe, color='red', linestyle='--', label=f'DCPA Safe ({VesselParams.DCPA_safe} m)')
-        ax2.set_ylabel('DCPA [m]')
+        # 2. Raw X positions (North)
+        ax2.plot(t_arr, os_x, label='OS X (North)', color='blue')
+        ax2.plot(t_arr, ts_x, label='TS X (Raw)', color='red', linestyle='--')
+        ax2.set_ylabel('North (X) [m]')
         ax2.grid(True, linestyle='--', alpha=0.5)
         ax2.legend(loc='upper right')
 
-        # 3. TCPA Subplot
-        ax3.plot(t_arr, tcpa_arr, color='#ff7f0e', linewidth=2.0, label='TCPA')
-        ax3.axhline(0.0, color='gray', linestyle=':', label='CPA Horizon (TCPA = 0)')
-        ax3.set_ylabel('TCPA [s]')
-        ax3.set_xlabel('Simulation Time [s]')
+        # 3. Raw Y positions (East)
+        ax3.plot(t_arr, os_y, label='OS Y (East)', color='blue')
+        ax3.plot(t_arr, ts_y, label='TS Y (Raw)', color='red', linestyle='--')
+        ax3.set_ylabel('East (Y) [m]')
         ax3.grid(True, linestyle='--', alpha=0.5)
         ax3.legend(loc='upper right')
 
-        # Draw vertical hitmarker across all subplots where intention was shared
-        if self.t_intent_shared is not None:
-            for ax in (ax1, ax2, ax3):
-                ax.axvline(
-                    self.t_intent_shared, color='crimson', linestyle='-.', linewidth=1.8,
-                    label='Intent Received' if ax == ax1 else None
-                )
-                ax.text(
-                    self.t_intent_shared + 0.4, ax.get_ylim()[0] + 0.1 * (ax.get_ylim()[1] - ax.get_ylim()[0]),
-                    f"Intent Shared ({self.t_intent_shared:.1f}s)",
-                    color='crimson', fontsize=8, fontweight='bold'
-                )
+        # 4. Computed Distance Delta check
+        # |X_os - X_ts| and |Y_os - Y_ts|
+        dx = np.abs(os_x - ts_x)
+        dy = np.abs(os_y - ts_y)
+        ax4.plot(t_arr, dx, label='|X_OS - X_TS|', color='purple')
+        ax4.plot(t_arr, dy, label='|Y_OS - Y_TS|', color='darkorange')
+        ax4.set_ylabel('Separation [m]')
+        ax4.set_xlabel('Simulation Time [s]')
+        ax4.grid(True, linestyle='--', alpha=0.5)
+        ax4.legend(loc='upper right')
 
         plt.tight_layout()
-        
-        # Conditional display vs. background save
-        if not self.auto_close:
-            # Single-run mode: show the interactive window directly (blocks until closed)
-            plt.show()
-        else:
-            # Batch mode: save silently to disk without popping up a window
-            scenario_name = self.get_parameter('scenario').value
-            os.makedirs("results_plots", exist_ok=True)
-            plt.savefig(f"results_plots/{scenario_name}_colregs_metrics.png", dpi=300)
-            plt.close(fig)
+        plt.show()
 
 
 def main(args=None):

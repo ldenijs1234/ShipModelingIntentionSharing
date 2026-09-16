@@ -25,7 +25,6 @@ class TSSimulatorNode(Node):
     def __init__(self):
         super().__init__('ts_simulator_node')
 
-        # 1. ROS Parameters
         self.declare_parameter('scenario', 'case01')
         self.declare_parameter('share_intent', True)
         self.declare_parameter('t_advance', 15.0)
@@ -42,13 +41,21 @@ class TSSimulatorNode(Node):
         self.u_nominal = float(config['ts_nominal_speed'])
         self.w_mission_ts = config['ts_mission_wps'].copy()
         self.wp_idx = 1
-        self.internal_state = config['ts_initial_state'].copy()
+        
+        # Map config [x, y, psi, u, v, r] to internal dynamics state [x, y, psi, r, b, u] (Thesis Section 3.1.1)
+        raw_state = config['ts_initial_state']
+        self.internal_state = np.array([
+            raw_state[0],  # X
+            raw_state[1],  # Y
+            raw_state[2],  # psi
+            raw_state[5],  # r (yaw rate)
+            0.0,           # b (heading bias)
+            raw_state[3]   # u (surge velocity)
+        ], dtype=np.float64)
 
-        # 2. Tracking State
         self.os_state = None
         self.intent_broadcasted = False
 
-        # 3. ROS Publishers and Subscriptions
         self.state_pub = self.create_publisher(VesselKinematics, '/ts/state_vector', 10)
         self.route_pub = self.create_publisher(RouteIntent, '/ts/route_true', 10)
         
@@ -56,7 +63,6 @@ class TSSimulatorNode(Node):
             Float64MultiArray, '/os/state_vector', self.os_state_callback, 10
         )
 
-        # 4. Timers scaled by speed_factor
         dt_state_timer = self.dt / self.speed_factor
         dt_route_timer = 0.1 / self.speed_factor
 
@@ -69,11 +75,10 @@ class TSSimulatorNode(Node):
         )
 
     def os_state_callback(self, msg: Float64MultiArray):
-        # OS state vector: [x, y, psi, r, b, u]
+        # OS state vector: [X, Y, psi, u, v, r]
         self.os_state = np.array(msg.data, dtype=np.float64)
 
     def calculate_tcpa(self) -> float:
-        """Calculates current TCPA against Own Ship."""
         if self.os_state is None:
             return float('inf')
 
@@ -81,13 +86,16 @@ class TSSimulatorNode(Node):
         p_os = self.os_state[0:2]
         r_pos = p_os - p_ts
 
+        u_ts = self.internal_state[5] # u is index 5 internally
         v_ts = np.array([
-            self.internal_state[5] * np.cos(self.internal_state[2]),
-            self.internal_state[5] * np.sin(self.internal_state[2])
+            u_ts * np.cos(self.internal_state[2]),
+            u_ts * np.sin(self.internal_state[2])
         ])
+        
+        u_os = self.os_state[3] # OS state is in Sensor Format, u is index 3
         v_os = np.array([
-            self.os_state[5] * np.cos(self.os_state[2]),
-            self.os_state[5] * np.sin(self.os_state[2])
+            u_os * np.cos(self.os_state[2]),
+            u_os * np.sin(self.os_state[2])
         ])
         v_rel = v_os - v_ts
 
@@ -95,34 +103,41 @@ class TSSimulatorNode(Node):
         if v_rel_sq < 1e-6:
             return float('inf')
 
-        # TCPA = - (r_rel . v_rel) / ||v_rel||^2
         tcpa = -np.dot(r_pos, v_rel) / v_rel_sq
         return float(tcpa)
 
     def step_gnc_pipeline(self):
-        # A. Guidance Layer (LOS)
-        psi_los, _, self.wp_idx = LOSGuidance.compute_heading_reference(
-            x_os=self.internal_state,
+        # Translate Internal State to Sensor State [X, Y, psi, u, v, r] for Guidance/Control (Thesis Section 3.1.2)
+        x_sensor = np.array([
+            self.internal_state[0],
+            self.internal_state[1],
+            self.internal_state[2],
+            self.internal_state[5], # u
+            0.0,                    # v
+            self.internal_state[3]  # r
+        ], dtype=np.float64)
+
+        # Safeguard waypoint index to prevent array bounds overflow during fast maneuvers
+        max_wp_idx = max(len(self.w_mission_ts) - 1, 1)
+        self.wp_idx = min(self.wp_idx, max_wp_idx)
+
+        psi_los, _, next_wp_idx = LOSGuidance.compute_heading_reference(
+            x_os=x_sensor,
             w_active=self.w_mission_ts,
             current_wp_idx=self.wp_idx
         )
+        self.wp_idx = min(next_wp_idx, max_wp_idx)
 
-        # B. Check distance to final destination and command zero speed on arrival
         dist_to_final = float(np.linalg.norm(self.internal_state[0:2] - self.w_mission_ts[-1, 0:2]))
         u_target = 0.0 if dist_to_final <= VesselParams.D_m else self.u_nominal
 
-        # C. Control Layer (Autopilot)
-        x_ctrl = self.internal_state.copy()
-        x_ctrl[5] = self.internal_state[3]  # Map r to index 5 for Autopilot
-
         u_c, tau_c, _ = Autopilot.compute_control(
-            x_os=x_ctrl,
+            x_os=x_sensor,
             psi_wp=psi_los,
             psi_ca_reactive=0.0,
             u_nominal=u_target
         )
 
-        # D. Vessel Dynamics
         inputs = np.array([tau_c, u_c], dtype=np.float64)
         self.internal_state = VesselDynamics.rk4(
             x=self.internal_state,
@@ -130,16 +145,15 @@ class TSSimulatorNode(Node):
             dt=self.dt
         )
 
-        # E. Publish true TS kinematics
         msg = VesselKinematics()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.vessel_mmsi = 244000002
         msg.x = float(self.internal_state[0])
         msg.y = float(self.internal_state[1])
         msg.psi = float(self.internal_state[2])
-        msg.u = float(self.internal_state[5])
+        msg.u = float(self.internal_state[5]) # surge speed is index 5 internally
         msg.v = 0.0
-        msg.r = float(self.internal_state[3])
+        msg.r = float(self.internal_state[3]) # yaw rate is index 3 internally
         self.state_pub.publish(msg)
 
     def publish_route(self):
@@ -148,7 +162,6 @@ class TSSimulatorNode(Node):
 
         tcpa = self.calculate_tcpa()
 
-        # Broadcast intent once when TCPA drops below t_advance
         if not self.intent_broadcasted and tcpa <= self.t_advance:
             route_msg = RouteIntent()
             route_msg.header.stamp = self.get_clock().now().to_msg()
@@ -166,7 +179,6 @@ class TSSimulatorNode(Node):
                 f">>> INTENT BROADCAST: Triggered at TCPA = {tcpa:.2f}s (Threshold: {self.t_advance}s)"
             )
         elif self.intent_broadcasted:
-            # Continually publish to ensure active reception
             route_msg = RouteIntent()
             route_msg.header.stamp = self.get_clock().now().to_msg()
             route_msg.vessel_mmsi = 244000002
@@ -189,7 +201,6 @@ def main(args=None):
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
-
 
 if __name__ == '__main__':
     main()

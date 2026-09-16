@@ -193,35 +193,33 @@ class LivePlotterNode(Node):
     self.os_wps_y = arr[:, 1].tolist()
 
   def os_callback(self, msg):
-    if self.os_history_x:
-      dist = math.hypot(
-          msg.data[0] - self.os_history_x[-1],
-          msg.data[1] - self.os_history_y[-1],
-      )
-      if dist > 5.0:
-        self.os_history_x.clear()
-        self.os_history_y.clear()
-        self.os_history_psi.clear()
-        self.os_history_r.clear()
-        self.time_history.clear()
+    if len(msg.data) < 3:
+        return
+    x, y, psi = msg.data[0], msg.data[1], msg.data[2]
+    
+    # Filter origin drops
+    if self.os_history_x and abs(x) < 1e-4 and abs(y) < 1e-4:
+        return
 
-    self.os_state = [msg.data[0], msg.data[1], msg.data[2]]
-    self.os_history_x.append(msg.data[0])
-    self.os_history_y.append(msg.data[1])
-    self.os_history_psi.append(msg.data[2])
+    self.os_state = [x, y, psi]
+    self.os_history_x.append(x)
+    self.os_history_y.append(y)
+    self.os_history_psi.append(psi)
 
     r_val = msg.data[5] if len(msg.data) > 5 else 0.0
     self.os_history_r.append(r_val)
     self.time_history.append(self.telemetry["time"])
 
   def ts_callback(self, msg):
+    # Filter origin dropouts
+    if abs(msg.x) < 1e-4 and abs(msg.y) < 1e-4:
+        return
+
+    # Check for unreasonable jumps without clearing history
     if self.ts_history_x:
-      dist = math.hypot(
-          msg.x - self.ts_history_x[-1], msg.y - self.ts_history_y[-1]
-      )
-      if dist > 5.0:
-        self.ts_history_x.clear()
-        self.ts_history_y.clear()
+        dist = math.hypot(msg.x - self.ts_history_x[-1], msg.y - self.ts_history_y[-1])
+        if dist > 2.0:
+            return  # Drop outlier point instead of clearing track
 
     self.ts_state = [msg.x, msg.y, msg.psi]
     self.ts_history_x.append(msg.x)
@@ -301,7 +299,6 @@ def main(args=None):
           fontsize=11, fontweight="bold", pad=10,
       )
       ax.grid(True, linestyle="--", alpha=0.45)
-
       ax.axvline(0.0, color="gray", linestyle=":", linewidth=1.0, alpha=0.6, label="Original Mission")
 
       if len(node.os_wps_x) >= 2:
@@ -335,7 +332,7 @@ def main(args=None):
       # Determine if the scenario is physically over
       time_limit = 220.0 
       if isinstance(node.config, dict):
-        time_limit = node.config.get("sim_time_limit", node.config.get("t_sim", 120.0))
+        time_limit = node.config.get("sim_time_limit", node.config.get("t_sim", 220.0))
 
       encounter_cleared = False
       if len(node.os_history_x) > 20 and len(node.ts_history_x) > 20:

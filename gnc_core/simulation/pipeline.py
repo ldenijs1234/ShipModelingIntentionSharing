@@ -28,16 +28,18 @@ class SynchronousPipeline:
 
         # 2. Risk & Decision (10 Hz)
         cached["dcpa"], cached["tcpa"] = RiskCalculator.calculate_cpa(x_os, x_ts)
-        cached["w_active"], cached["psi_ca"], cached["state"] = DecisionLayer.evaluate(
-            x_os, x_ts, w_mission_os, w_ts_delayed, cached["dcpa"], cached["tcpa"]
+        
+        # Unpack the 4 returned values, including the speed multiplier 'p_ca'
+        cached["w_active"], cached["psi_ca"], cached["p_ca"], cached["state"] = DecisionLayer.evaluate(
+            x_os, x_ts, w_mission_os, w_ts_delayed, cached["dcpa"], cached["tcpa"], u_nominal,
         )
 
         # 3. Guidance Layer
         cached["psi_wp"], _, cached["wp_idx"] = LOSGuidance.compute_heading_reference(
-            x_os, cached["w_active"], cached["wp_idx"]
+            x_os, cached["w_active"], cached.get("wp_idx", 0)
         )
 
-        # ROOT FIX 2: In State B.1, base heading command on nominal track direction (pi_p)
+        # In State B.1, base heading command on nominal track direction (pi_p)
         # rather than allowing cross-track error to cancel out psi_ca
         if cached["state"] == "State B.1":
             # Nominal track bearing from mission waypoints (e.g. 0.0 rad for due North)
@@ -49,8 +51,11 @@ class SynchronousPipeline:
             psi_guidance_ref = cached["psi_wp"]
 
         # 4. Control Layer (Eq. 3.42: psi_cmd = psi_ref + psi_ca)
+        # Apply the speed multiplier dynamically determined by the DecisionLayer
+        target_speed = float(u_nominal * cached.get("p_ca", 1.0))
+        
         u_c, tau_c, psi_cmd = Autopilot.compute_control(
-            x_os, psi_guidance_ref, cached["psi_ca"], u_nominal
+            x_os, psi_guidance_ref, cached["psi_ca"], target_speed
         )
 
         # 5. Vessel Dynamics Integration via RK4 (10 Hz)

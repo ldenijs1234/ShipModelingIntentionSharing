@@ -12,7 +12,7 @@ CASE02_CONFIG = {
     # -------------------------------------------------------------------------
     # Initial state: [x, y, psi, u, v, r]
     # Starts at x = -20 m, y = 0.0 m, heading North (psi = 0 rad)
-    "os_initial_state": np.array([-20.0, 0.0, 0.0, 0.45, 0.0, 0.0], dtype=np.float64),
+    "os_initial_state": np.array([-20.0, 0.0, 0.0, 0.0, 0.0, 0.45], dtype=np.float64),
     "os_nominal_speed": 0.45,  # [m/s]
     "os_mission_wps": np.array([
         [-20.0, 0.0],
@@ -28,12 +28,12 @@ CASE02_CONFIG = {
     # -------------------------------------------------------------------------
     # Initial state: [x, y, psi, u, v, r]
     # Starts at x = +20 m, y = -1.0 m, heading South (psi = pi rad)
-    "ts_initial_state": np.array([20.0, -1.0, np.pi, 0.45, 0.0, 0.0], dtype=np.float64),
+    "ts_initial_state": np.array([20.0, -1.0, np.pi, 0.0, 0.0, 0.45], dtype=np.float64),
     "ts_nominal_speed": 0.45,  # [m/s]
     # TS route: South along west lane, then turns southeast at x = 5.0 m
     "ts_mission_wps": np.array([
         [ 20.0, -1.0],
-        [  3.0, -1.0],
+        [  6.0, -1.0],
         [-20.0, 10.0]
     ], dtype=np.float64),
 

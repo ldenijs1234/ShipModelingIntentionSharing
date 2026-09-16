@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 from typing import Optional, Tuple
 import numpy as np
-import rclpy.logging
+from shapely.geometry import LineString
 
 from gnc_core.config.vessel_params import VesselParams
 from gnc_core.navigation.risk import RiskCalculator
@@ -11,30 +11,45 @@ class DecisionLayer:
     _mode_a_active = False
     _mode_b_active = False
     _w_evasive_latched = None
+    _p_evasive_latched = 1.0
 
     k_chi_stb = 5.0
     k_chi_port = 5.2
+    k_p = 10.0
+    
+    # New penalty weights defined matching LaTeX
+    k_safety = 1000.0
+    k_grounding = 5.0
+    k_colregs = 10.0
 
     # Discrete search set matching Akdag (radians)
     chi_candidates = np.radians(
         np.array([
-            -75.0, -60.0, -45.0, -30.0, -15.0,
+            -90.0, -75.0, -60.0, -45.0, -30.0, -15.0,
             0.0,
-            15.0, 30.0, 45.0, 60.0, 75.0,
+            15.0, 30.0, 45.0, 60.0, 75.0, 90.0,
         ])
     )
+    
+    # Discrete speed multiplier candidates matching Akdag
+    p_candidates = np.array([1.0, 0.5, 0.0])
 
     @classmethod
     def _evaluate_candidate_hazard(
         cls,
         x_os: np.ndarray,
         chi: float,
+        p_cand: float,
         ts_traj: np.ndarray,
         steps: int,
         dt_sim: float,
         d_safe: float,
+        u_nominal: float = 0.45,
+        canal_polygons = None,
+        scenario: str = "Unknown"
     ) -> Tuple[float, float, int]:
-        u_os = float(x_os[3]) if abs(x_os[3]) > 0.05 else 0.45
+        
+        u_os = (float(x_os[3]) if abs(x_os[3]) > 0.05 else float(u_nominal)) * p_cand
         psi_cand = x_os[2] + chi
 
         vx = u_os * np.cos(psi_cand)
@@ -44,19 +59,51 @@ class DecisionLayer:
         os_x = x_os[0] + vx * t_steps
         os_y = x_os[1] + vy * t_steps
 
+        # 1. Safety Cost (J_safety) - Fixed to strict piece-wise zero tail
         dists = np.hypot(os_x - ts_traj[:, 0], os_y - ts_traj[:, 1])
         min_idx = int(np.argmin(dists))
         min_dist = float(dists[min_idx])
 
         if min_dist <= d_safe:
-            j_safety = 1000.0 * ((d_safe / max(min_dist, 0.05)) ** 4.0)
+            j_safety = cls.k_safety * ((d_safe / max(min_dist, 0.05)) ** 4.0)
         else:
-            j_safety = 50.0 * (d_safe / min_dist)
+            j_safety = 0.0
 
+        # 2. Grounding Cost (J_grounding)
+        j_grounding = 0.0
+        if canal_polygons is not None:
+            traj_line = LineString(np.column_stack((os_x, os_y)))
+            min_static_dist = traj_line.distance(canal_polygons)
+            if min_static_dist <= VesselParams.d_safe_static:
+                j_grounding = cls.k_grounding * ((VesselParams.d_safe_static / (min_static_dist + 0.05)) ** 2.5)
+
+        # 3. Control Effort Cost (J_control & J_speed)
         k_w = cls.k_chi_stb if chi <= 0.0 else cls.k_chi_port
         j_control = k_w * (chi**2)
+        j_speed = cls.k_p * (1.0 - p_cand)
 
-        return j_safety + j_control, min_dist, min_idx
+        # 4. COLREGs Cost (J_colregs)
+        j_colregs = 0.0
+        if scenario != "Unknown":
+            # Vectorized mapping to [-180, 180] relative bearing
+            phi_array = np.arctan2(ts_traj[:, 1] - os_y, ts_traj[:, 0] - os_x)
+            beta_array = np.degrees(phi_array - psi_cand)
+            beta_array = (beta_array + 180.0) % 360.0 - 180.0
+
+            if scenario == "Head-On":
+                mu_array = (beta_array <= 13.0)
+            elif scenario in ["Crossing_A", "Crossing_B"]:
+                mu_array = (beta_array <= 0.0)
+            elif scenario == "Overtaking":
+                mu_array = (np.abs(beta_array) <= 22.5)
+            else:
+                mu_array = np.zeros_like(beta_array, dtype=bool)
+
+            if np.any(mu_array):
+                j_colregs = cls.k_colregs
+
+        total_cost = j_safety + j_grounding + j_control + j_speed + j_colregs
+        return total_cost, min_dist, min_idx
 
     @classmethod
     def _sample_route(
@@ -106,32 +153,39 @@ class DecisionLayer:
         dcpa: float,
         tcpa: float,
         u_nominal: float = 0.45,
-    ) -> Tuple[np.ndarray, float, str]:
+        canal_polygons = None
+    ) -> Tuple[np.ndarray, float, float, str]:
+        
         if x_ts is None:
             cls._mode_a_active = False
             cls._mode_b_active = False
             cls._w_evasive_latched = None
-            return np.copy(w_os), 0.0, "STAND_ON"
+            return np.copy(w_os), 0.0, 1.0, "STAND_ON"
 
-        if x_os[3] < 0.20 or x_ts[3] < 0.20:
+        u_os = float(x_os[3]) if abs(x_os[3]) > 0.05 else float(u_nominal)
+        u_ts = float(x_ts[3]) if abs(x_ts[3]) > 0.05 else float(u_nominal)
+
+        if u_os < 0.10 or u_ts < 0.10:
             cls._mode_a_active = False
             cls._mode_b_active = False
             cls._w_evasive_latched = None
-            return np.copy(w_os), 0.0, "State B.2"
+            return np.copy(w_os), 0.0, 1.0, "State B.2"
 
         d_safe = VesselParams.DCPA_safe
         curr_dist = float(np.hypot(x_os[0] - x_ts[0], x_os[1] - x_ts[1]))
+        
+        # Identify fixed COLREGs scenario for the evaluation step
+        scenario = "Unknown"
+        if x_ts is not None:
+            beta_init = RiskCalculator.calculate_relative_bearing(x_os, x_ts)
+            scenario = RiskCalculator.classify_colreg_scenario(beta_init)
 
         # ----------------------------------------------------------------------
         # Mode A: Shared Intent Route Available
         # ----------------------------------------------------------------------
         if w_ts_delayed is not None and len(w_ts_delayed) >= 2:
-            # 1. Cross-Track Error relative to original nominal mission
-            # For a straight North track (x along North, y cross-track):
             e_cte = abs(x_os[1] - w_os[0, 1])
 
-            # If the ship was evading and has returned close to the nominal line,
-            # OR if vessels are past CPA, stay strictly in State A.2
             has_passed_cpa = tcpa < 0.0
             is_back_on_route = e_cte < 0.35 and (
                 cls._mode_a_active or cls._mode_b_active
@@ -141,30 +195,24 @@ class DecisionLayer:
                 cls._mode_a_active = False
                 cls._mode_b_active = False
                 cls._w_evasive_latched = None
-                return np.copy(w_os), 0.0, "State A.2"
+                return np.copy(w_os), 0.0, 1.0, "State A.2"
 
-          # 2. Maintain active evasive route while clearing
             if cls._mode_a_active and cls._w_evasive_latched is not None:
-                # Release condition: OS has passed TS longitudinally or CPA has cleared
                 if (tcpa < -1.0 and curr_dist > (d_safe * 1.3)) or (tcpa < -15.0):
                     cls._mode_a_active = False
                     cls._w_evasive_latched = None
-                    return np.copy(w_os), 0.0, "State A.2"
-                return cls._w_evasive_latched, 0.0, "State A.1"
+                    cls._p_evasive_latched = 1.0
+                    return np.copy(w_os), 0.0, 1.0, "State A.2"
+                return cls._w_evasive_latched, 0.0, cls._p_evasive_latched, "State A.1"
 
             cls._mode_b_active = False
 
-            u_os = float(x_os[3]) if abs(x_os[3]) > 0.05 else float(u_nominal)
-            u_ts = float(x_ts[3]) if abs(x_ts[3]) > 0.05 else float(u_nominal)
-            hor_time = 70.0
+            hor_time = max(120.0, tcpa + 20.0) if tcpa > 0.0 else 70.0
             dt_sim = 0.5
             steps = int(hor_time / dt_sim)
 
-            # Sample TS along broadcast intent route
             ts_traj, _ = cls._sample_route(w_ts_delayed, x_ts[:2], u_ts, steps, dt_sim)
 
-            # 2. Build the OS active trajectory from CURRENT PHYSICAL POSITION
-            # Find downstream mission waypoints strictly ahead of OS current position
             diffs_os = np.diff(w_os[:, :2], axis=0)
             downstream_indices = []
             for i in range(len(w_os) - 1):
@@ -178,36 +226,35 @@ class DecisionLayer:
             else:
                 unsailed_wps = w_os[-1:, :2]
 
-            # Active baseline: Live position -> Unsailed waypoints
             w_os_base = np.vstack([x_os[:2], unsailed_wps])
 
-            # Sample rollout along this live-anchored route
             os_traj, s_os = cls._sample_route(w_os_base, x_os[:2], u_os, steps, dt_sim)
             dists = np.hypot(os_traj[:, 0] - ts_traj[:, 0], os_traj[:, 1] - ts_traj[:, 1])
             k_cpa = int(np.argmin(dists))
             min_dist = float(dists[k_cpa])
 
-            # If already clear of TS, smoothly track to the remaining mission waypoints
             if min_dist >= (d_safe * 1.35) and curr_dist > (d_safe * 1.4):
-                return np.copy(w_os), 0.0, "State A.2"
+                return np.copy(w_os), 0.0, 1.0, "State A.2"
 
-            # 3. Optimize passing direction with Akdag cost function
             best_cost = float("inf")
             best_chi = 0.0
+            best_p = 1.0
+            
             for chi in cls.chi_candidates:
-                cost, _, _ = cls._evaluate_candidate_hazard(x_os, chi, ts_traj, steps, dt_sim, d_safe)
-                if cost < best_cost:
-                    best_cost = cost
-                    best_chi = chi
+                for p_cand in cls.p_candidates:
+                    cost, _, _ = cls._evaluate_candidate_hazard(
+                        x_os, chi, p_cand, ts_traj, steps, dt_sim, d_safe, u_nominal, canal_polygons, scenario
+                    )
+                    if cost < best_cost:
+                        best_cost = cost
+                        best_chi = chi
+                        best_p = p_cand
 
-            # Starboard (+1) vs Port (-1) normal displacement
             lat_sign = 1.0 if best_chi <= 0.0 else -1.0
             req_offset = lat_sign * max(d_safe * 1.4, 1.8)
 
-            # Conflict point on the active live route
             P_cpa = os_traj[k_cpa]
 
-            # Vector of active segment at CPA
             diffs_base = np.diff(w_os_base[:, :2], axis=0)
             seg_lens_base = np.hypot(diffs_base[:, 0], diffs_base[:, 1])
             s_cpa = s_os + (u_os * k_cpa * dt_sim)
@@ -223,21 +270,15 @@ class DecisionLayer:
             seg_dir = diffs_base[cpa_seg_idx] / max(seg_lens_base[cpa_seg_idx], 1e-4)
             n_stb = np.array([-seg_dir[1], seg_dir[0]])
 
-            # 4. Enforce the "No-Backtrack" safety invariant:
-            # If OS is already displaced to Starboard, W_evade must never be closer to the center than current position!
             W_evade = P_cpa + req_offset * n_stb
-            if x_os[1] > 0.5 and W_evade[1] < x_os[1]:
-                W_evade[1] = x_os[1] + 0.5  # Maintain/expand current clearance
-            elif x_os[1] < -0.5 and W_evade[1] > x_os[1]:
-                W_evade[1] = x_os[1] - 0.5
 
-            # 5. Assemble and LATCH evasive route
             rejoin_idx = min(cpa_seg_idx + 1, len(w_os_base) - 1)
             remaining_wps = w_os_base[rejoin_idx:, :2]
 
             cls._w_evasive_latched = np.vstack([x_os[:2], W_evade, remaining_wps])
             cls._mode_a_active = True
-            return cls._w_evasive_latched, 0.0, "State A.1"
+            cls._p_evasive_latched = best_p
+            return cls._w_evasive_latched, 0.0, best_p, "State A.1"
 
         # ----------------------------------------------------------------------
         # Mode B: Reactive Fallback (No Intent)
@@ -246,31 +287,37 @@ class DecisionLayer:
         cls._w_evasive_latched = None
 
         domain_breached, _ = RiskCalculator.check_ship_domain_breach(x_os, x_ts)
-        threshold_cpa = max(d_safe * 1.15, VesselParams.R_lateral + VesselParams.B)
+        
+        threshold_cpa = VesselParams.R_lateral + VesselParams.B
         cpa_risk = (dcpa < threshold_cpa) and (0.0 <= tcpa <= VesselParams.TCPA_safe)
-        risk_active = cpa_risk or domain_breached
+        
+        close_quarters = (curr_dist < d_safe * 1.5) and (dcpa < threshold_cpa) and (tcpa > -3.0)
+        risk_active = cpa_risk or domain_breached or close_quarters
 
         if cls._mode_b_active:
-            if tcpa <= 0.0 and dcpa >= threshold_cpa:
+            if tcpa <= -1.0 and curr_dist > (d_safe * 1.3):
                 cls._mode_b_active = False
         else:
             if risk_active:
                 cls._mode_b_active = True
 
         if cls._mode_b_active:
-            beta = RiskCalculator.calculate_relative_bearing(x_os, x_ts)
-            scenario = RiskCalculator.classify_colreg_scenario(beta)
-
             urgency = np.clip((d_safe - dcpa) / max(d_safe, 1e-3), 0.0, 1.0)
             psi_headon = np.radians(30.0 + (60.0 - 30.0) * urgency)
 
             if scenario == "Head-On":
                 psi_ca = psi_headon
+                p_ca = 0.5 if urgency > 0.6 else 1.0
             elif scenario in ["Crossing_A", "Crossing_B"]:
                 psi_ca = np.radians(45.0)
+                p_ca = 0.5 if curr_dist < (d_safe * 1.5) else 1.0
             else:
                 psi_ca = np.radians(30.0)
+                p_ca = 1.0
 
-            return np.copy(w_os), float(psi_ca), "State B.1"
+            if curr_dist < d_safe * 0.8:
+                p_ca = 0.0
 
-        return np.copy(w_os), 0.0, "State B.2"
+            return np.copy(w_os), float(psi_ca), float(p_ca), "State B.1"
+
+        return np.copy(w_os), 0.0, 1.0, "State B.2"
