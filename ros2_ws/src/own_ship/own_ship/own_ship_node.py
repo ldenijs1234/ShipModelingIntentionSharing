@@ -65,6 +65,8 @@ class OSTransceiverNode(Node):
         self.w_active_pub = self.create_publisher(Float64MultiArray, '/os/active_waypoints', 10)
 
         self.x_ts_raw = None
+        self.x_ts_est = None
+        self.last_ts_packet_time = None
         self.w_ts_delayed = None
         self.t_intent_shared = None
         self.sim_finished = False
@@ -111,7 +113,17 @@ class OSTransceiverNode(Node):
             self.get_logger().info(f"[OS] Intent received at t = {self.t_intent_shared:.2f} s")
 
     def ts_state_callback(self, msg: VesselKinematics):
-        self.x_ts_raw = np.array([msg.x, msg.y, msg.psi, msg.u, msg.v, msg.r])
+        # Filter uninitialized coordinates
+        if abs(msg.x) < 1e-4 and abs(msg.y) < 1e-4:
+            return
+
+        # Raw state vector: [X, Y, psi, u, v, r]
+        fresh_state = np.array([msg.x, msg.y, msg.psi, msg.u, msg.v, msg.r], dtype=np.float64)
+        self.x_ts_raw = fresh_state
+
+        # Re-anchor the dead-reckoning model to the newly arrived ground truth
+        self.x_ts_est = fresh_state.copy()
+        self.last_ts_packet_time = self.get_clock().now()
 
     def step_gnc_pipeline(self):
         if self.x_ts_raw is None or self.sim_finished:
@@ -121,6 +133,24 @@ class OSTransceiverNode(Node):
         if abs(self.x_ts_raw[0]) < 1e-4 and abs(self.x_ts_raw[1]) < 1e-4:
             return
 
+        # Initialize self.x_ts_est if this is the first tick
+        if getattr(self, "x_ts_est", None) is None:
+            self.x_ts_est = self.x_ts_raw.copy()
+
+        # =============================================================
+        # PASTE HERE: 20 Hz Kinematic Interpolation / Dead-Reckoning
+        # =============================================================
+        psi_ts = self.x_ts_est[2]
+        u_ts = self.x_ts_est[3]
+        r_ts = self.x_ts_est[5]
+
+        # Integrate yaw rate and position forward by self.dt
+        psi_ts_next = (psi_ts + r_ts * self.dt + np.pi) % (2.0 * np.pi) - np.pi
+        self.x_ts_est[2] = psi_ts_next
+        self.x_ts_est[0] += u_ts * np.cos(psi_ts_next) * self.dt
+        self.x_ts_est[1] += u_ts * np.sin(psi_ts_next) * self.dt
+        # =============================================================
+
         # 1. Check if OS has reached the terminal waypoint
         target_wp = self.cached["w_active"][-1, :2]
         dist_to_final = np.linalg.norm(self.internal_state[:2] - target_wp)
@@ -129,11 +159,11 @@ class OSTransceiverNode(Node):
         # Capture previous state before the pipeline runs
         prev_state = self.cached["state"]
 
-        # 2. Step synchronous pipeline
+        # 2. Step synchronous pipeline with the interpolated target state (self.x_ts_est)
         self.internal_state, self.cached, telemetry = SynchronousPipeline.step(
             internal_state=self.internal_state,
             w_mission_os=self.w_mission_os,
-            x_ts_raw=self.x_ts_raw,
+            x_ts_raw=self.x_ts_est,  # <-- PASS self.x_ts_est INSTEAD OF self.x_ts_raw
             w_ts_delayed=self.w_ts_delayed,
             cached=self.cached,
             dt=self.dt,
@@ -145,19 +175,19 @@ class OSTransceiverNode(Node):
         if self.cached["state"] != prev_state:
             self.get_logger().info(f"[OS] Transitioned to {self.cached['state']}")
 
-        # 3. Compute instantaneous Range
+        # 3. Compute instantaneous Range using interpolated position
         current_range = float(
-            np.linalg.norm(self.internal_state[:2] - self.x_ts_raw[:2])
+            np.linalg.norm(self.internal_state[:2] - self.x_ts_est[:2])
         )
 
-        # 4. Log data for analysis (including yaw rate r at index 3)
+        # 4. Log data for analysis
         sim_time = telemetry["time"]
         self.hist_time.append(sim_time)
         self.hist_dcpa.append(telemetry["dcpa"])
         self.hist_tcpa.append(telemetry["tcpa"])
         self.hist_range.append(current_range)
         self.hist_os_pos.append(self.internal_state[:2].copy())
-        self.hist_ts_pos.append(self.x_ts_raw[:2].copy())
+        self.hist_ts_pos.append(self.x_ts_est[:2].copy())  # <-- Log smooth coordinates
         self.hist_r.append(float(self.internal_state[3]))
 
         # 5. Publish ROS topics
@@ -186,8 +216,7 @@ class OSTransceiverNode(Node):
             abs(self.internal_state[5]) < 0.05
             and dist_to_final <= (VesselParams.D_m + 0.2)
         )
-        # x_ts_raw is in Sensor format [X, Y, psi, u, v, r], so surge speed is index 3
-        ts_stopped = abs(self.x_ts_raw[3]) < 0.05
+        ts_stopped = abs(self.x_ts_est[3]) < 0.05
 
         if os_stopped and ts_stopped:
             self.sim_finished = True
@@ -195,7 +224,6 @@ class OSTransceiverNode(Node):
                 "\033[92mBoth vessels arrived at terminal waypoints.\033[0m"
             )
             self.plot_encounter_metrics()
-            # Do not call sys.exit(0) here; live_plotter_node handles the display and exit
 
     
     def plot_encounter_metrics(self):

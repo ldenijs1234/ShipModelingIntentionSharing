@@ -111,7 +111,7 @@ class LivePlotterNode(Node):
         self.os_state = self.config["os_initial_state"][:3].tolist()
         self.ts_state = self.config["ts_initial_state"][:3].tolist()
         self.telemetry = {"time": 0.0, "dcpa": 0.0, "tcpa": 0.0}
-
+        
         self.os_wps_x = self.config["os_mission_wps"][:, 0].tolist()
         self.os_wps_y = self.config["os_mission_wps"][:, 1].tolist()
         self.ts_route_x = []
@@ -121,8 +121,8 @@ class LivePlotterNode(Node):
         self.os_history_y = []
         self.os_history_psi = []
         self.os_history_r = []
-        self.ts_history_x = []
-        self.ts_history_y = []
+        self.ts_history_x = [self.ts_state[0]]
+        self.ts_history_y = [self.ts_state[1]]
         self.time_history = []
 
         self.create_subscription(Float64MultiArray, "/os/state_vector", self.os_callback, 10)
@@ -162,10 +162,13 @@ class LivePlotterNode(Node):
     def ts_callback(self, msg):
         if abs(msg.x) < 1e-4 and abs(msg.y) < 1e-4:
             return
+
         if self.ts_history_x:
             dist = math.hypot(msg.x - self.ts_history_x[-1], msg.y - self.ts_history_y[-1])
-            if dist > 2.0:
+            # Allow for up to 10s intervals at cruising speeds (e.g. 10s * 1.5 m/s = 15m)
+            if dist > 25.0:
                 return
+
         self.ts_state = [msg.x, msg.y, msg.psi]
         self.ts_history_x.append(msg.x)
         self.ts_history_y.append(msg.y)

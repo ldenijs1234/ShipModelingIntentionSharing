@@ -35,7 +35,7 @@ class RiskCalculator:
 
         dVx, dVy = Vx_ob - Vx, Vy_ob - Vy
         V_rel = np.sqrt(dVx**2 + dVy**2)
-        if V_rel < 1e-5:
+        if V_rel < 0.03:
             return float(R), 0.0
 
         psi_vrel = np.arctan2(dVy, dVx)

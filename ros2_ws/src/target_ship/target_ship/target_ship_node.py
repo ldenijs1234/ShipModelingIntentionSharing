@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import sys
 from pathlib import Path
+from collections import deque
 
 # Connect to the external core Python library
 parent_repo = Path('/mnt/c/Users/lars/Documents/Ship dynamics - Thesis Lars de Nijs')
@@ -37,12 +38,12 @@ class TSSimulatorNode(Node):
         self.t_advance = float(self.get_parameter('t_advance').value)
         self.speed_factor = max(float(self.get_parameter('speed_factor').value), 0.1)
 
-        self.dt = 0.05  # 20 Hz integration step
+        self.dt = 0.05  # 20 Hz simulation integration step
         self.u_nominal = float(config['ts_nominal_speed'])
         self.w_mission_ts = config['ts_mission_wps'].copy()
         self.wp_idx = 1
         
-        # Map config [x, y, psi, u, v, r] to internal dynamics state [x, y, psi, r, b, u] (Thesis Section 3.1.1)
+        # Map config [x, y, psi, u, v, r] to internal dynamics state [x, y, psi, r, b, u]
         raw_state = config['ts_initial_state']
         self.internal_state = np.array([
             raw_state[0],  # X
@@ -56,6 +57,12 @@ class TSSimulatorNode(Node):
         self.os_state = None
         self.intent_broadcasted = False
 
+        # ITU-R M.1371 Table 1 Dynamic AIS interval tracking
+        self.sim_time = 0.0
+        self.last_ais_tx_time = -999.0
+        # Buffer up to 30 seconds of heading history at 20 Hz (600 steps)
+        self.heading_history = deque(maxlen=int(30.0 / self.dt))
+
         self.state_pub = self.create_publisher(VesselKinematics, '/ts/state_vector', 10)
         self.route_pub = self.create_publisher(RouteIntent, '/ts/route_true', 10)
         
@@ -63,20 +70,53 @@ class TSSimulatorNode(Node):
             Float64MultiArray, '/os/state_vector', self.os_state_callback, 10
         )
 
-        dt_state_timer = self.dt / self.speed_factor
+        dt_sim_timer = self.dt / self.speed_factor
         dt_route_timer = 0.1 / self.speed_factor
 
-        self.state_timer = self.create_timer(dt_state_timer, self.step_gnc_pipeline)
+        # 20 Hz loop runs simulation and publishes AIS dynamic reports when due
+        self.sim_timer = self.create_timer(dt_sim_timer, self.step_gnc_pipeline)
         self.route_timer = self.create_timer(dt_route_timer, self.publish_route)
+
+        self.publish_current_state()
 
         mode = f"WITH intent (t_advance = {self.t_advance}s)" if self.share_intent else "WITHOUT intent"
         self.get_logger().info(
-            f"TS Simulator running for [{scenario_name}] ({mode}) at {self.speed_factor}x speed."
+            f"TS Simulator running for [{scenario_name}] ({mode}) at {self.speed_factor}x speed "
+            f"with ITU-R M.1371-6 dynamic AIS intervals."
         )
 
     def os_state_callback(self, msg: Float64MultiArray):
-        # OS state vector: [X, Y, psi, u, v, r]
         self.os_state = np.array(msg.data, dtype=np.float64)
+
+    def get_itu_reporting_interval(self) -> float:
+        """
+        Calculates nominal reporting interval per ITU-R M.1371-6 Table 1:
+        - SOG <= 14 knots: 10.0 s
+        - SOG <= 14 knots and changing course (> 5 deg diff from 30s mean): 3.333 s (3 1/3 s)
+        """
+        current_psi = self.internal_state[2]
+        self.heading_history.append(current_psi)
+
+        if len(self.heading_history) > 1:
+            mean_psi = float(np.arctan2(
+                np.mean(np.sin(self.heading_history)),
+                np.mean(np.cos(self.heading_history))
+            ))
+            # Angular course change relative to 30-second window
+            delta_course = abs((current_psi - mean_psi + np.pi) % (2.0 * np.pi) - np.pi)
+            is_changing_course = delta_course > np.radians(5.0)
+        else:
+            is_changing_course = False
+
+        # Speed conversion: 1 m/s = 1.94384 knots
+        sog_knots = float(self.internal_state[5]) * 1.94384
+
+        if sog_knots <= 14.0:
+            return 10.0 / 3.0 if is_changing_course else 10.0  # 3 1/3 s vs 10 s
+        elif 14.0 < sog_knots <= 23.0:
+            return 2.0 if is_changing_course else 6.0
+        else:
+            return 2.0
 
     def calculate_tcpa(self) -> float:
         if self.os_state is None:
@@ -86,13 +126,13 @@ class TSSimulatorNode(Node):
         p_os = self.os_state[0:2]
         r_pos = p_os - p_ts
 
-        u_ts = self.internal_state[5] # u is index 5 internally
+        u_ts = self.internal_state[5]
         v_ts = np.array([
             u_ts * np.cos(self.internal_state[2]),
             u_ts * np.sin(self.internal_state[2])
         ])
         
-        u_os = self.os_state[3] # OS state is in Sensor Format, u is index 3
+        u_os = self.os_state[3]
         v_os = np.array([
             u_os * np.cos(self.os_state[2]),
             u_os * np.sin(self.os_state[2])
@@ -106,18 +146,29 @@ class TSSimulatorNode(Node):
         tcpa = -np.dot(r_pos, v_rel) / v_rel_sq
         return float(tcpa)
 
+    def publish_current_state(self):
+        msg = VesselKinematics()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.vessel_mmsi = 244000002
+        msg.x = float(self.internal_state[0])
+        msg.y = float(self.internal_state[1])
+        msg.psi = float(self.internal_state[2])
+        msg.u = float(self.internal_state[5])
+        msg.v = 0.0
+        msg.r = float(self.internal_state[3])
+        self.state_pub.publish(msg)
+
     def step_gnc_pipeline(self):
-        # Translate Internal State to Sensor State [X, Y, psi, u, v, r] for Guidance/Control (Thesis Section 3.1.2)
+        # 1. Continuous Guidance & Control (20 Hz)
         x_sensor = np.array([
             self.internal_state[0],
             self.internal_state[1],
             self.internal_state[2],
-            self.internal_state[5], # u
-            0.0,                    # v
-            self.internal_state[3]  # r
+            self.internal_state[5],  # u
+            0.0,                     # v
+            self.internal_state[3]   # r
         ], dtype=np.float64)
 
-        # Safeguard waypoint index to prevent array bounds overflow during fast maneuvers
         max_wp_idx = max(len(self.w_mission_ts) - 1, 1)
         self.wp_idx = min(self.wp_idx, max_wp_idx)
 
@@ -145,16 +196,23 @@ class TSSimulatorNode(Node):
             dt=self.dt
         )
 
-        msg = VesselKinematics()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.vessel_mmsi = 244000002
-        msg.x = float(self.internal_state[0])
-        msg.y = float(self.internal_state[1])
-        msg.psi = float(self.internal_state[2])
-        msg.u = float(self.internal_state[5]) # surge speed is index 5 internally
-        msg.v = 0.0
-        msg.r = float(self.internal_state[3]) # yaw rate is index 3 internally
-        self.state_pub.publish(msg)
+        self.sim_time += self.dt
+
+        # 2. Discrete AIS Dynamic State Broadcast per ITU-R M.1371-6 Table 1
+        req_interval = self.get_itu_reporting_interval()
+        if (self.sim_time - self.last_ais_tx_time) >= req_interval:
+            self.publish_current_state()
+            msg = VesselKinematics()
+            msg.header.stamp = self.get_clock().now().to_msg()
+            msg.vessel_mmsi = 244000002
+            msg.x = float(self.internal_state[0])
+            msg.y = float(self.internal_state[1])
+            msg.psi = float(self.internal_state[2])
+            msg.u = float(self.internal_state[5])
+            msg.v = 0.0
+            msg.r = float(self.internal_state[3])
+            self.state_pub.publish(msg)
+            self.last_ais_tx_time = self.sim_time
 
     def publish_route(self):
         if not self.share_intent:
