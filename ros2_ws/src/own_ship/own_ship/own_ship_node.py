@@ -55,7 +55,18 @@ class OSTransceiverNode(Node):
 
         # Target Ship tracking & dead-reckoning state
         self.x_ts_raw: Optional[np.ndarray] = None
-        self.x_ts_est: Optional[np.ndarray] = None
+
+        # Pre-seed TS dead-reckoning estimate with scenario initial state to avoid t=0 glitches
+        raw_ts_init = config.get('ts_initial_state', None)
+        if raw_ts_init is not None:
+            # Format: [X, Y, psi, u, v, r]
+            self.x_ts_est = np.array([
+                raw_ts_init[0], raw_ts_init[1], raw_ts_init[2],
+                raw_ts_init[3], 0.0, raw_ts_init[5]
+            ], dtype=np.float64)
+        else:
+            self.x_ts_est = None
+
         self.w_ts_delayed: Optional[np.ndarray] = None
         self.t_intent_shared: Optional[float] = None
         self.sim_finished = False
@@ -167,16 +178,20 @@ class OSTransceiverNode(Node):
             self.get_logger().info(f"[OS] Transitioned to {self.cached['state']}")
 
         # 3. Range calculation & Telemetry History Logging
-        if self.x_ts_est is not None:
+        if self.x_ts_est is not None and abs(self.x_ts_est[0]) < 900.0:
             current_range = float(np.linalg.norm(self.internal_state[:2] - self.x_ts_est[:2]))
             ts_pos = self.x_ts_est[:2].copy()
+            dcpa_val = telemetry["dcpa"]
+            tcpa_val = telemetry["tcpa"]
         else:
-            current_range = float(np.linalg.norm(self.internal_state[:2] - self.w_mission_os[-1, :2]))
-            ts_pos = np.array([999.0, 999.0])
+            current_range = np.nan
+            ts_pos = np.array([np.nan, np.nan])
+            dcpa_val = np.nan
+            tcpa_val = np.nan
 
         self.hist_time.append(self.sim_time)
-        self.hist_dcpa.append(telemetry["dcpa"])
-        self.hist_tcpa.append(telemetry["tcpa"])
+        self.hist_dcpa.append(dcpa_val)
+        self.hist_tcpa.append(tcpa_val)
         self.hist_range.append(current_range)
         self.hist_os_pos.append(self.internal_state[:2].copy())
         self.hist_ts_pos.append(ts_pos)

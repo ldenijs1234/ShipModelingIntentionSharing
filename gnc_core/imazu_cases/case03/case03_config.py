@@ -76,8 +76,8 @@ CASE03_CONFIG = {
     ], dtype=np.float64),
 
     # Target Ship (TS) Initial Conditions & Route (Heads toward west opening, steers right into main)
-    "ts_initial_state": np.array([0.0, 22.0, -np.pi / 2.0, 0.4, 0.0, 0.0], dtype=np.float64),
-    "ts_nominal_speed": 0.4,
+    "ts_initial_state": np.array([0.0, 22.0, -np.pi / 2.0, 0.45, 0.0, 0.0], dtype=np.float64),
+    "ts_nominal_speed": 0.45,
     "ts_mission_wps": np.array([
         [0.0, 22.0],
         [0.0, 2.5],
