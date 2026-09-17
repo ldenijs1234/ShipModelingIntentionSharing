@@ -12,6 +12,7 @@ def generate_launch_description():
     route_interval_arg = DeclareLaunchArgument('route_interval', default_value='3.0')
     speed_factor_arg = DeclareLaunchArgument('speed_factor', default_value='1.0')
     auto_close_arg = DeclareLaunchArgument('auto_close', default_value='False')
+    intent_range_arg = DeclareLaunchArgument('intent_range', default_value='15.0')
 
     return LaunchDescription([
         scenario_arg,
@@ -20,6 +21,7 @@ def generate_launch_description():
         route_interval_arg,
         speed_factor_arg,
         auto_close_arg,
+        intent_range_arg,
         
         # 1. Target Ship Node
         Node(
@@ -55,7 +57,8 @@ def generate_launch_description():
             parameters=[{
                 'scenario': LaunchConfiguration('scenario'),
                 'speed_factor': LaunchConfiguration('speed_factor'),
-                'auto_close': LaunchConfiguration('auto_close')
+                'auto_close': LaunchConfiguration('auto_close'),
+                'intent_range': LaunchConfiguration('intent_range')
             }],
             on_exit=[EmitEvent(event=Shutdown())]
         ),
@@ -70,7 +73,7 @@ def generate_launch_description():
                 'scenario': LaunchConfiguration('scenario'),
                 'mode': LaunchConfiguration('share_intent'),
                 'latency': LaunchConfiguration('tau'),
-                'interval': LaunchConfiguration('route_interval'), # Mapped to plotter's 'interval' parameter
+                'interval': LaunchConfiguration('route_interval'),
                 'auto_close': LaunchConfiguration('auto_close')
             }],
             on_exit=[EmitEvent(event=Shutdown())]

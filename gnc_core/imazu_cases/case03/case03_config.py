@@ -68,8 +68,8 @@ CASE03_CONFIG = {
     },
 
     # Own Ship (OS) Initial Conditions & Route (Northbound through main canal)
-    "os_initial_state": np.array([-20.0, 0.0, 0.0, 0.45, 0.0, 0.0], dtype=np.float64),
-    "os_nominal_speed": 0.45,
+    "os_initial_state": np.array([-20.0, 0.0, 0.0, 0.42, 0.0, 0.0], dtype=np.float64),
+    "os_nominal_speed": 0.42,
     "os_mission_wps": np.array([
         [-20.0, 0.0],
         [25.0, 0.0]

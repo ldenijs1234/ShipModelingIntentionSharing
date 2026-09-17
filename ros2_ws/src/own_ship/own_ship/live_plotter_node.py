@@ -131,7 +131,7 @@ class LivePlotterNode(Node):
         self.create_subscription(Float64MultiArray, "/os/active_waypoints", self.os_wps_callback, 10)
         self.create_subscription(Float64MultiArray, "/os/telemetry", self.telem_callback, 10)
         self.create_subscription(VesselKinematics, "/ts/state_vector", self.ts_callback, 10)
-        self.create_subscription(RouteIntent, "/ts/route_delayed", self.ts_route_callback, 10)
+        self.create_subscription(RouteIntent, "/os/perceived_ts_route", self.ts_route_callback, 10)
 
         self.get_logger().info(f"Live Plotter ready [{self.scenario_name}]")
 

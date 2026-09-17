@@ -29,10 +29,12 @@ class OSTransceiverNode(Node):
         self.declare_parameter('scenario', 'case01')
         self.declare_parameter('speed_factor', 1.0)
         self.declare_parameter('auto_close', False)
+        self.declare_parameter('intent_range', 15.0)
 
         scenario_name = self.get_parameter('scenario').value
         self.speed_factor = max(float(self.get_parameter('speed_factor').value), 0.1)
         self.auto_close = bool(self.get_parameter('auto_close').value)
+        self.intent_range = float(self.get_parameter('intent_range').value)
 
         config = load_scenario(scenario_name)
 
@@ -100,12 +102,16 @@ class OSTransceiverNode(Node):
         self.w_active_pub = self.create_publisher(Float64MultiArray, '/os/active_waypoints', 10)
         self.telemetry_pub = self.create_publisher(Float64MultiArray, '/os/telemetry', 10)
 
+        # Publisher for the TS intent that OS has legitimately received in range
+        self.ts_perceived_route_pub = self.create_publisher(RouteIntent, '/os/perceived_ts_route', 10)
+
+        # Static subscription for global AIS kinematics
         self.ts_state_sub = self.create_subscription(
             VesselKinematics, '/ts/state_vector', self.ts_state_callback, 10
         )
-        self.ts_route_sub = self.create_subscription(
-            RouteIntent, '/ts/route_delayed', self.ts_route_callback, 10
-        )
+        
+        # Dynamic subscription for VHF routing intent
+        self.ts_route_sub = None 
 
         dt_timer = self.dt / self.speed_factor
         self.timer = self.create_timer(dt_timer, self.step_gnc_pipeline)
@@ -127,6 +133,9 @@ class OSTransceiverNode(Node):
         if self.t_intent_shared is None:
             self.t_intent_shared = self.sim_time
 
+        # Forward the intent to the plotter only after receiving it legitimately in range
+        self.ts_perceived_route_pub.publish(msg)
+
     def step_gnc_pipeline(self):
         if self.sim_finished:
             return
@@ -140,6 +149,31 @@ class OSTransceiverNode(Node):
 
         # 1. Kinematic Dead-Reckoning of TS between AIS Broadcasts (20 Hz)
         if self.x_ts_est is not None:
+            dist_to_ts = float(np.linalg.norm(self.internal_state[:2] - self.x_ts_est[:2]))
+            
+            # Dynamic Intent Subscription based on Range
+            if dist_to_ts <= self.intent_range:
+                if self.ts_route_sub is None:
+                    self.get_logger().info(
+                        f"\033[93m[OS] TS entered intent comms range ({dist_to_ts:.1f}m <= {self.intent_range}m). Subscribing to Intent.\033[0m"
+                    )
+                    self.ts_route_sub = self.create_subscription(
+                        RouteIntent, '/ts/route_delayed', self.ts_route_callback, 10
+                    )
+            else:
+                if self.ts_route_sub is not None:
+                    self.get_logger().info(
+                        f"\033[91m[OS] TS left intent comms range ({dist_to_ts:.1f}m > {self.intent_range}m). Dropping Intent.\033[0m"
+                    )
+                    self.destroy_subscription(self.ts_route_sub)
+                    self.ts_route_sub = None
+                    self.w_ts_delayed = None
+                    self.t_intent_shared = None
+
+                    # Clear TS route from plotter when leaving comms range
+                    empty_msg = RouteIntent()
+                    self.ts_perceived_route_pub.publish(empty_msg)
+            
             psi_ts = self.x_ts_est[2]
             u_ts = self.x_ts_est[3]
             r_ts = self.x_ts_est[5]
