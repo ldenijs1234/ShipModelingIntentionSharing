@@ -111,6 +111,7 @@ def run_dynamic_batch(log_dir=None, d_safe=VesselParams.DCPA_safe):
         ra_entry["data"]["os_psi"],
         ra_entry["data"]["os_r"],
         ra_entry["data"]["ts_pos"],
+        os_u=ra_entry["data"]["os_u"] if "os_u" in ra_entry["data"] else None,
     )
 
     sc_results = []
@@ -121,6 +122,7 @@ def run_dynamic_batch(log_dir=None, d_safe=VesselParams.DCPA_safe):
         is_entry["data"]["os_psi"],
         is_entry["data"]["os_r"],
         is_entry["data"]["ts_pos"],
+        os_u=is_entry["data"]["os_u"] if "os_u" in is_entry["data"] else None,
       )
       comp = evaluator.evaluate_comparison(kpi_ra, kpi_is)
 

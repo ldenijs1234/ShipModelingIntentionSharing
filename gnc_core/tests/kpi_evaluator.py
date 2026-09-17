@@ -35,6 +35,32 @@ class ScenarioKPIEvaluator:
         alpha_k = np.arctan2(dy, dx)
         return -(x - wp_a[0]) * np.sin(alpha_k) + (y - wp_a[1]) * np.cos(alpha_k)
 
+    def calculate_multi_segment_cte(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+        """Computes true perpendicular CTE across a multi-waypoint polyline."""
+        pts = np.column_stack([x, y])
+        n_pts = len(pts)
+        ctes = np.zeros(n_pts)
+
+        wps = self.nominal_wps[:, :2]
+        seg_starts = wps[:-1]
+        seg_ends = wps[1:]
+        seg_vecs = seg_ends - seg_starts
+        seg_lens_sq = np.sum(seg_vecs**2, axis=1)
+
+        for i in range(n_pts):
+            p = pts[i]
+            # Projection factor t for all segments
+            v = p - seg_starts
+            t = np.sum(v * seg_vecs, axis=1) / np.maximum(seg_lens_sq, 1e-6)
+            t_clamped = np.clip(t, 0.0, 1.0)
+            
+            # Closest point on each segment
+            projs = seg_starts + t_clamped[:, np.newaxis] * seg_vecs
+            dists = np.linalg.norm(p - projs, axis=1)
+            ctes[i] = np.min(dists)
+
+        return ctes
+
     def evaluate_single_run(
         self,
         t: np.ndarray,
@@ -80,10 +106,8 @@ class ScenarioKPIEvaluator:
         else:
             j_ctrl = 0.0
 
-        # 3. Mission Tracking: Cross-Track Error relative to nominal track
-        e_cte = self.calculate_cte(
-            os_pos[:, 0], os_pos[:, 1], self.nominal_wps[0], self.nominal_wps[1]
-        )
+        # 3. Mission Tracking: Multi-segment Cross-Track Error
+        e_cte = self.calculate_multi_segment_cte(os_pos[:, 0], os_pos[:, 1])
         j_cte = float(trapz_fn(np.abs(e_cte), t)) / duration if len(t) > 1 else 0.0
 
         # 4. Speed Degradation Penalty: Normalized deviation from u_nominal

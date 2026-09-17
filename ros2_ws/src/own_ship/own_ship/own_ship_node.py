@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import sys
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -27,9 +28,18 @@ class OSTransceiverNode(Node):
         super().__init__('own_ship_node')
 
         self.declare_parameter('scenario', 'case01')
+        self.declare_parameter('mode', False)  # True = IS, False = RA
+        self.declare_parameter('latency', 0.0)
+        self.declare_parameter('interval', 5.0)
         self.declare_parameter('speed_factor', 1.0)
         self.declare_parameter('auto_close', False)
         self.declare_parameter('intent_range', 15.0)
+
+        # Parse mode
+        mode_val = self.get_parameter('mode').value
+        self.sim_mode = "IS" if (str(mode_val).upper() == "TRUE" or mode_val is True) else "RA"
+        self.sim_latency = float(self.get_parameter('latency').value)
+        self.sim_interval = float(self.get_parameter('interval').value)
 
         scenario_name = self.get_parameter('scenario').value
         self.speed_factor = max(float(self.get_parameter('speed_factor').value), 0.1)
@@ -259,24 +269,71 @@ class OSTransceiverNode(Node):
             os_at_goal = dist_to_final <= 0.5
             os_stopped = abs(self.internal_state[5]) < 0.05 and os_at_goal
 
-            # Use the actual scenario TS destination, not a hardcoded point
             if self.w_ts_delayed is not None and len(self.w_ts_delayed) > 0:
                 ts_goal = self.w_ts_delayed[-1]
             else:
                 ts_goal = self.w_mission_ts_nominal[-1, :2]
 
             dist_ts_to_goal = float(np.linalg.norm(self.x_ts_est[:2] - ts_goal[:2]))
-
             ts_at_goal = dist_ts_to_goal <= 0.6
             ts_stopped = (abs(self.x_ts_est[3]) < 0.08) and ts_at_goal
 
             if os_stopped and ts_stopped and not self.sim_finished:
                 self.sim_finished = True
                 self.get_logger().info("\033[92mBoth vessels arrived at terminal waypoints.\033[0m")
-                self.plot_encounter_metrics()
-
+                
                 if self.timer:
                     self.timer.cancel()
+
+                self.save_run_log()
+
+                # Show metrics only during manual interactive runs
+                if not self.auto_close:
+                    self.plot_encounter_metrics()
+
+                # If batch / auto_close is enabled, shut down cleanly so the launch event fires
+                if self.auto_close:
+                    self.get_logger().info("[OS] Auto-close active. Triggering node shutdown.")
+                    self.destroy_node()
+                    rclpy.shutdown()
+
+    def save_run_log(self):
+        if len(self.hist_time) < 2:
+            return
+
+        output_dir = os.path.join(str(parent_repo), "simulation_logs")
+        os.makedirs(output_dir, exist_ok=True)
+
+        scenario_name = self.get_parameter('scenario').value
+        
+        if self.sim_mode == "IS":
+            tag = f"{scenario_name}_IS_tau{self.sim_latency:.1f}_dt{self.sim_interval:.1f}"
+        else:
+            tag = f"{scenario_name}_RA"
+            
+        filepath = os.path.join(output_dir, f"{tag}.npz")
+
+        t_arr = np.array(self.hist_time)
+        os_pos = np.array(self.hist_os_pos)
+        ts_pos = np.array(self.hist_ts_pos)
+        r_arr = np.array(self.hist_r)
+
+        np.savez(
+            filepath,
+            t=t_arr,
+            os_pos=os_pos,
+            os_psi=np.zeros_like(t_arr),
+            os_r=r_arr,
+            ts_pos=ts_pos,
+            nominal_wps=np.array(self.w_mission_os),
+            scenario=scenario_name,
+            mode=self.sim_mode,
+            latency=self.sim_latency,
+            interval=self.sim_interval,
+        )
+        self.get_logger().info(
+            f"\033[92m[OS] Successfully saved full run log ({len(t_arr)} points, duration: {t_arr[-1]:.1f}s): {filepath}\033[0m"
+        )
 
     def plot_encounter_metrics(self):
         t_arr = np.array(self.hist_time)

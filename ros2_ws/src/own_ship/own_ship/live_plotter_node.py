@@ -122,6 +122,7 @@ class LivePlotterNode(Node):
         self.os_history_x = []
         self.os_history_y = []
         self.os_history_psi = []
+        self.os_history_u = []
         self.os_history_r = []
         self.ts_history_x = [self.ts_state[0]]
         self.ts_history_y = [self.ts_state[1]]
@@ -157,8 +158,13 @@ class LivePlotterNode(Node):
         self.os_history_x.append(x)
         self.os_history_y.append(y)
         self.os_history_psi.append(psi)
-        r_val = msg.data[5] if len(msg.data) > 5 else 0.0
+        
+        # Index 3 is yaw rate r; Index 5 is surge speed u
+        r_val = msg.data[3] if len(msg.data) > 3 else 0.0
+        u_val = msg.data[5] if len(msg.data) > 5 else self.config.get('os_nominal_speed', 0.45)
         self.os_history_r.append(r_val)
+        self.os_history_u.append(u_val)
+        
         self.time_history.append(self.telemetry["time"])
 
     def ts_callback(self, msg):
@@ -197,6 +203,7 @@ class LivePlotterNode(Node):
             os_pos=np.column_stack((self.os_history_x[:n], self.os_history_y[:n])),
             os_psi=np.array(self.os_history_psi[:n]),
             os_r=np.array(self.os_history_r[:n]),
+            os_u=np.array(self.os_history_u[:n]),
             ts_pos=np.column_stack((self.ts_history_x[:n], self.ts_history_y[:n])),
             nominal_wps=np.array(self.config["os_mission_wps"]),
             scenario=self.scenario_name,
@@ -275,7 +282,7 @@ def main(args=None):
             ax.legend(loc="upper right", bbox_to_anchor=(0.98, 0.97), fontsize=8.0, framealpha=0.9, edgecolor="#cccccc")
             plt.tight_layout()
             plt.pause(0.1)
-
+    
             time_limit = 220.0
             if isinstance(node.config, dict):
                 time_limit = node.config.get("sim_time_limit", node.config.get("t_sim", 220.0))
@@ -293,9 +300,8 @@ def main(args=None):
     finally:
         plt.ioff()
         plt.close("all")
-        node.save_run_log()
-        node.destroy_node()
         if rclpy.ok():
+            node.destroy_node()
             rclpy.shutdown()
         os._exit(0)
 
