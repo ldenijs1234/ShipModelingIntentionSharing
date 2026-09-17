@@ -28,7 +28,7 @@ class SynchronousPipeline:
         x_ts = StateEstimation.estimate_target_from_ais(x_ts_raw, dt_ais=dt)
 
         # 2. Risk & Decision (10 Hz)
-        cached["dcpa"], cached["tcpa"] = RiskCalculator.calculate_cpa(x_os, x_ts)
+        cached["dcpa"], cached["tcpa"] = RiskCalculator.calculate_cpa(x_os, x_ts, u_nominal)
 
         prev_state = cached.get("state", "State B.2")
         prev_route_len = len(cached.get("w_active", w_mission_os))

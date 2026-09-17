@@ -22,13 +22,16 @@ class RiskCalculator:
         return "Crossing_B"
 
     @staticmethod
-    def calculate_cpa(x_os: np.ndarray, x_ts: np.ndarray) -> Tuple[float, float]:
+    def calculate_cpa(x_os: np.ndarray, x_ts: np.ndarray, u_nominal: float) -> Tuple[float, float]:
         """Calculates DCPA and TCPA geometrically (Eq. 3.14 - 3.22)."""
         X, Y, psi, u, _, _ = x_os
         X_ob, Y_ob, psi_ts, u_ts, _, _ = x_ts
 
-        Vx, Vy = u * np.cos(psi), u * np.sin(psi)
-        Vx_ob, Vy_ob = u_ts * np.cos(psi_ts), u_ts * np.sin(psi_ts)
+        u_eff_os = float(u) if abs(u) >= 0.15 else float(u_nominal)
+        u_eff_ts = float(u_ts) if abs(u_ts) >= 0.15 else float(u_nominal)
+
+        Vx, Vy = u_eff_os * np.cos(psi), u_eff_os * np.sin(psi)
+        Vx_ob, Vy_ob = u_eff_ts * np.cos(psi_ts), u_eff_ts * np.sin(psi_ts)
 
         dx, dy = X_ob - X, Y_ob - Y
         R = np.sqrt(dx**2 + dy**2)

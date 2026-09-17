@@ -189,22 +189,37 @@ class DecisionLayer:
         # ----------------------------------------------------------------------
         # Mode A: Shared Intent Route Available
         # ----------------------------------------------------------------------
+        # ----------------------------------------------------------------------
+        # Mode A: Shared Intent Route Available
+        # ----------------------------------------------------------------------
         if w_ts_delayed is not None and len(w_ts_delayed) >= 2:
-            # 1. Check exit conditions ONLY after vessels pass CPA or clear hazard
+            # 1. Check exit conditions ONLY after vessels have truly passed each other
             if cls._mode_a_active:
-                passed_cpa = tcpa < -1.0 or (x_os[0] > x_ts[0] + 1.5)  # OS has sailed past TS in North (x)
-                cleared_distance = curr_dist > (d_safe * 2.0)
+                # Relative position vector from OS to TS
+                dx = x_ts[0] - x_os[0]
+                dy = x_ts[1] - x_os[1]
                 
+                # Check if TS is astern of OS relative to OS heading
+                # dot product of OS forward direction and vector to TS < 0 means TS is behind OS
+                cos_psi = np.cos(x_os[2])
+                sin_psi = np.sin(x_os[2])
+                longitudinal_rel = dx * cos_psi + dy * sin_psi
+                
+                # Truly passed CPA: TS is physically behind OS AND vessels are separating
+                is_astern = longitudinal_rel < -0.5
+                passed_cpa = (tcpa < -1.0 and curr_dist < 6.0) or is_astern
+                cleared_distance = curr_dist > (d_safe * 1.8)
+
                 if passed_cpa and cleared_distance:
                     cls._mode_a_active = False
                     cls._w_evasive_latched = None
                     cls._p_evasive_latched = 1.0
                     return np.copy(w_os), 0.0, 1.0, "State A.2"
-                
+
                 # Hold the active evasive route until safely past
                 if cls._w_evasive_latched is not None:
                     return cls._w_evasive_latched, 0.0, cls._p_evasive_latched, "State A.1"
-
+                
             cls._mode_b_active = False
 
             # Horizon planning steps
@@ -282,9 +297,10 @@ class DecisionLayer:
 
             calc_duration_ms = (time.perf_counter() - t_start_a1) * 1000.0
             print(
-                f"\033[93m[State A.1 Route Plan] Computation Time: {calc_duration_ms:6.2f} ms\033[0m"
+                f"\033[93m[State A.1 Route Plan] Computation Time: {calc_duration_ms:6.2f} ms\033[0m",
+                flush=True
             )
-            
+
             return cls._w_evasive_latched, 0.0, best_p, "State A.1"
 
         # ----------------------------------------------------------------------

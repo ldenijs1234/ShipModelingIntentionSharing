@@ -40,6 +40,7 @@ class OSTransceiverNode(Node):
         self.sim_time = 0.0
         self.u_nominal = float(config['os_nominal_speed'])
         self.w_mission_os = config['os_mission_wps'].copy()
+        self.w_mission_ts_nominal = config['ts_mission_wps'].copy()
         self.canal_polygons = config.get('canal_polygons', None)
 
         # Internal state format [x, y, psi, r, b, u]
@@ -96,7 +97,7 @@ class OSTransceiverNode(Node):
 
         # ROS Publishers and Subscribers
         self.os_state_pub = self.create_publisher(Float64MultiArray, '/os/state_vector', 10)
-        self.w_active_pub = self.create_publisher(Float64MultiArray, '/os/w_active', 10)
+        self.w_active_pub = self.create_publisher(Float64MultiArray, '/os/active_waypoints', 10)
         self.telemetry_pub = self.create_publisher(Float64MultiArray, '/os/telemetry', 10)
 
         self.ts_state_sub = self.create_subscription(
@@ -143,7 +144,10 @@ class OSTransceiverNode(Node):
             u_ts = self.x_ts_est[3]
             r_ts = self.x_ts_est[5]
 
-            ts_goal = self.w_ts_delayed[-1] if self.w_ts_delayed is not None else np.array([25.0, 2.5])
+            if self.w_ts_delayed is not None and len(self.w_ts_delayed) > 0:
+                ts_goal = self.w_ts_delayed[-1]
+            else:
+                ts_goal = self.w_mission_ts_nominal[-1, :2]
             
             # Only integrate position forward if TS has not arrived at terminal waypoint
             if np.linalg.norm(self.x_ts_est[:2] - ts_goal[:2]) > 0.4:
@@ -221,7 +225,12 @@ class OSTransceiverNode(Node):
             os_at_goal = dist_to_final <= 0.5
             os_stopped = abs(self.internal_state[5]) < 0.05 and os_at_goal
 
-            ts_goal = self.w_ts_delayed[-1] if self.w_ts_delayed is not None else np.array([25.0, 2.5])
+            # Use the actual scenario TS destination, not a hardcoded point
+            if self.w_ts_delayed is not None and len(self.w_ts_delayed) > 0:
+                ts_goal = self.w_ts_delayed[-1]
+            else:
+                ts_goal = self.w_mission_ts_nominal[-1, :2]
+
             dist_ts_to_goal = float(np.linalg.norm(self.x_ts_est[:2] - ts_goal[:2]))
 
             ts_at_goal = dist_ts_to_goal <= 0.6
