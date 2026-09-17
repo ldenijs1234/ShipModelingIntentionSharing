@@ -173,7 +173,7 @@ def plot_summary_latency_curve(df_scenario: pd.DataFrame, scenario_name: str):
 
     ax.grid(True, linestyle=":", alpha=0.55, zorder=0)
     ax.legend(
-        loc="lower left", fontsize=8, framealpha=0.9, edgecolor="#cbd5e1"
+        loc="upper left", fontsize=8, framealpha=0.9, edgecolor="#cbd5e1"
     )
 
     plt.tight_layout()
