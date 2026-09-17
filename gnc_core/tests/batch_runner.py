@@ -10,27 +10,22 @@ from gnc_core.tests.kpi_evaluator import ScenarioKPIEvaluator
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+import os
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+
+
 def plot_summary_latency_curve(df_scenario: pd.DataFrame, scenario_name: str):
     """Plots Delta J vs.
 
-    Latency dynamically, detecting safety boundaries and zero-crossings
-    strictly from the data without hardcoded values.
+    Latency dynamically across multiple intervals without horizontal offsets
+    on breach markers.
     """
-    fig, ax = plt.subplots(figsize=(8, 4.8), dpi=100)
+    fig, ax = plt.subplots(figsize=(8.5, 5.0), dpi=100)
 
-    # Use rounded interval comparison to prevent float precision drops
     df = df_scenario.copy()
     df["interval_round"] = df["interval"].round(1)
-    df_dt5 = df[df["interval_round"] == 5.0].sort_values(by="latency")
-
-    if df_dt5.empty:
-        df_dt5 = df.sort_values(by="latency")
-
-    tau = df_dt5["latency"].to_numpy()
-    delta_j = df_dt5["delta_j"].to_numpy()
-
-    # Identify safety breaches: r_min < d_safe (1.0 m) or non-finite cost
-    breached = (df_dt5["r_min"] < 1.0).to_numpy() | ~np.isfinite(delta_j)
 
     y_min, y_max = -0.55, 0.65
     y_breach_ceiling = 0.55
@@ -40,7 +35,7 @@ def plot_summary_latency_curve(df_scenario: pd.DataFrame, scenario_name: str):
     ax.axhspan(y_min, 0.0, color="#f0fdf4", alpha=0.5, zorder=1)
 
     ax.text(
-        0.2,
+        3.2,
         0.04,
         "IS INFERIOR (Worse than RA)",
         fontsize=8,
@@ -49,7 +44,7 @@ def plot_summary_latency_curve(df_scenario: pd.DataFrame, scenario_name: str):
         alpha=0.8,
     )
     ax.text(
-        0.2,
+        3.2,
         -0.04,
         "IS SUPERIOR (Better than RA)",
         fontsize=8,
@@ -69,93 +64,110 @@ def plot_summary_latency_curve(df_scenario: pd.DataFrame, scenario_name: str):
         zorder=2,
     )
 
-    # 3. Safe Continuous Segments (omits broken lines over breach gaps)
-    safe_indices = np.where(~breached)[0]
-    if len(safe_indices) > 0:
-        segments = np.split(
-            safe_indices, np.where(np.diff(safe_indices) > 1)[0] + 1
+    # Color palette for distinct intervals
+    interval_palette = {
+        5.0: "#0284c7",  # Sky Blue
+        7.0: "#f59e0b",  # Amber
+        10.0: "#10b981",  # Emerald Green
+        15.0: "#8b5cf6",  # Violet
+        20.0: "#ec4899",  # Pink
+    }
+
+    # Loop strictly across all unique broadcast intervals in the dataset
+    for dt_val, group in df.groupby("interval_round"):
+        sorted_group = group.sort_values(by="latency")
+        tau = sorted_group["latency"].to_numpy()
+        delta_j = sorted_group["delta_j"].to_numpy()
+
+        breached = (
+            (sorted_group["r_min"] < 1.0).to_numpy() | ~np.isfinite(delta_j)
         )
-        for i, seg in enumerate(segments):
-            if len(seg) > 0:
-                ax.plot(
-                    tau[seg],
-                    delta_j[seg],
-                    marker="o",
-                    color="#0284c7",
-                    linewidth=1.8,
-                    markersize=5,
-                    label=(
-                        r"$\Delta T_{\mathrm{IS}} = 5.0\,\mathrm{s}$"
-                        if i == 0
-                        else None
-                    ),
-                    zorder=3,
+        color = interval_palette.get(dt_val, "#64748b")
+
+        # 3. Continuous Safe Segments
+        safe_indices = np.where(~breached)[0]
+        if len(safe_indices) > 0:
+            segments = np.split(
+                safe_indices, np.where(np.diff(safe_indices) > 1)[0] + 1
+            )
+            for i, seg in enumerate(segments):
+                if len(seg) > 0:
+                    ax.plot(
+                        tau[seg],
+                        delta_j[seg],
+                        marker="o",
+                        color=color,
+                        linewidth=1.8,
+                        markersize=5,
+                        label=(
+                            rf"$\Delta T_{{\mathrm{{IS}}}} = {dt_val:.1f}\,$s"
+                            if i == 0
+                            else None
+                        ),
+                        zorder=3,
+                    )
+
+        # 4. Safety Breaches (Placed exactly at their true tau coordinate)
+        if np.any(breached):
+            ax.scatter(
+                tau[breached],
+                np.full(np.sum(breached), y_breach_ceiling),
+                color=color,
+                marker="X",
+                s=85,
+                edgecolor="black",
+                linewidth=0.8,
+                label=rf"Breach ($\Delta T={dt_val:.0f}\,$s)",
+                zorder=4,
+            )
+            for t_b in tau[breached]:
+                ax.vlines(
+                    t_b,
+                    0.0,
+                    y_breach_ceiling,
+                    color=color,
+                    linestyle=":",
+                    linewidth=1.1,
+                    alpha=0.7,
+                    zorder=2,
                 )
 
-    # 4. Safety Breaches (r_min < d_safe) Placed at Ceiling with Vertical Markers
-    if np.any(breached):
-        ax.scatter(
-            tau[breached],
-            np.full(np.sum(breached), y_breach_ceiling),
-            color="#dc2626",
-            marker="X",
-            s=80,
-            edgecolor="#7f1d1d",
-            linewidth=0.8,
-            label=r"Safety Breach ($r_{\mathrm{min}} < d_{\mathrm{safe}}$)",
-            zorder=4,
-        )
-        for t_b in tau[breached]:
-            ax.vlines(
-                t_b,
-                0.0,
-                y_breach_ceiling,
-                color="#dc2626",
-                linestyle=":",
-                linewidth=1.0,
-                alpha=0.7,
+        # 5. Dynamic Tipping Line per Interval
+        tipping_tau = None
+        tipping_label = None
+
+        breach_indices = np.where(breached)[0]
+        if len(breach_indices) > 0:
+            tipping_tau = float(tau[breach_indices[0]])
+            tipping_label = (
+                rf"Limit ($\Delta T={dt_val:.0f}\,$s, $\tau={tipping_tau:.1f}\,$s)"
+            )
+        else:
+            valid_mask = np.isfinite(delta_j)
+            v_tau = tau[valid_mask]
+            v_dj = delta_j[valid_mask]
+            sign_changes = np.where(np.diff(np.sign(v_dj)) > 0)[0]
+            if len(sign_changes) > 0:
+                idx = sign_changes[0]
+                t0, t1 = v_tau[idx], v_tau[idx + 1]
+                y0, y1 = v_dj[idx], v_dj[idx + 1]
+                if abs(y1 - y0) > 1e-6:
+                    tipping_tau = float(t0 + (-y0) * (t1 - t0) / (y1 - y0))
+                    tipping_label = rf"Tipping ($\Delta T={dt_val:.0f}\,$s, $\tau\approx{tipping_tau:.2f}\,$s)"
+
+        if tipping_tau is not None:
+            ax.axvline(
+                tipping_tau,
+                color=color,
+                linestyle="-.",
+                linewidth=1.2,
+                alpha=0.85,
+                label=tipping_label,
                 zorder=2,
             )
 
-    # 5. Purely Dynamic Tipping Point Detection
-    tipping_tau = None
-    tipping_label = None
-
-    breach_indices = np.where(breached)[0]
-    if len(breach_indices) > 0:
-        # Criterion A: First safety violation encountered
-        first_breach_idx = breach_indices[0]
-        tipping_tau = float(tau[first_breach_idx])
-        tipping_label = (
-            rf"Safety Boundary ($\tau = {tipping_tau:.1f}\,\mathrm{{s}}$)"
-        )
-    else:
-        # Criterion B: Zero-crossing interpolation (from negative to positive Delta J)
-        valid_mask = np.isfinite(delta_j)
-        valid_tau = tau[valid_mask]
-        valid_dj = delta_j[valid_mask]
-        sign_changes = np.where(np.diff(np.sign(valid_dj)) > 0)[0]
-
-        if len(sign_changes) > 0:
-            idx = sign_changes[0]
-            t0, t1 = valid_tau[idx], valid_tau[idx + 1]
-            y0, y1 = valid_dj[idx], valid_dj[idx + 1]
-            if abs(y1 - y0) > 1e-6:
-                tipping_tau = float(t0 + (-y0) * (t1 - t0) / (y1 - y0))
-                tipping_label = rf"Efficiency Tipping ($\tau \approx {tipping_tau:.2f}\,\mathrm{{s}}$)"
-
-    if tipping_tau is not None:
-        ax.axvline(
-            tipping_tau,
-            color="#b91c1c",
-            linestyle="-.",
-            linewidth=1.2,
-            alpha=0.85,
-            label=tipping_label,
-            zorder=2,
-        )
-
     # Formatting and Layout
+    max_tau = float(np.nanmax(df["latency"].to_numpy()))
     ax.set_title(
         f"Latency Sensitivity & Tipping Point Analysis ({scenario_name.upper()})",
         fontsize=11,
@@ -167,9 +179,9 @@ def plot_summary_latency_curve(df_scenario: pd.DataFrame, scenario_name: str):
         r"Performance Differential $\Delta J = J_{\mathrm{IS}} - 1.0$",
         fontsize=9.5,
     )
-    ax.set_xlim(-0.3, float(np.nanmax(tau)) + 0.5)
+    ax.set_xlim(-0.3, max_tau + 0.5)
     ax.set_ylim(y_min, y_max)
-    ax.set_xticks(np.arange(0, int(np.nanmax(tau)) + 1, 1))
+    ax.set_xticks(np.arange(0, int(max_tau) + 1, 1))
 
     ax.grid(True, linestyle=":", alpha=0.55, zorder=0)
     ax.legend(

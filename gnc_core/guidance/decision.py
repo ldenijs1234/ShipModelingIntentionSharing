@@ -319,7 +319,7 @@ class DecisionLayer:
         if cls._mode_b_active:
             # Exit Mode B only after TCPA has passed AND vessels are separating
             # (Independent of North/South travel direction)
-            has_passed = (tcpa < -2.0) and (curr_dist > max(d_safe * 1.5, 3.0))
+            has_passed = (tcpa < 0.0) and (curr_dist > (d_safe * 1.2))
             if has_passed:
                 cls._mode_b_active = False
         else:
