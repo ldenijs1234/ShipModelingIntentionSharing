@@ -212,9 +212,8 @@ class DecisionLayer:
 
                 if passed_cpa and cleared_distance:
                     cls._mode_a_active = False
-                    cls._w_evasive_latched = None
-                    cls._p_evasive_latched = 1.0
-                    return np.copy(w_os), 0.0, 1.0, "State A.2"
+                    active_route = cls._w_evasive_latched if cls._w_evasive_latched is not None else np.copy(w_os)
+                    return active_route, 0.0, 1.0, "State A.2"
 
                 # Hold the active evasive route until safely past
                 if cls._w_evasive_latched is not None:
@@ -282,7 +281,7 @@ class DecisionLayer:
                 accum += length
 
             seg_dir = diffs_base[cpa_seg_idx] / max(seg_lens_base[cpa_seg_idx], 1e-4)
-            n_stb = np.array([-seg_dir[1], seg_dir[0]])  # Right / Starboard normal
+            n_stb = np.array([seg_dir[1], -seg_dir[0]])  # Starboard normal in NED (x = North, y = East)
 
             # Latch a stable evasive polyline: [Start, Evade, Rejoin]
             W_evade = P_cpa + req_offset * n_stb

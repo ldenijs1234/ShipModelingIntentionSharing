@@ -38,8 +38,13 @@ class SynchronousPipeline:
             x_os, x_ts, w_mission_os, w_ts_delayed, cached["dcpa"], cached["tcpa"], u_nominal, canal_polygons
         )
 
-        # Re-anchor downstream waypoint index upon state transitions
-        if prev_state == "State B.1" and cached["state"] == "State B.2":
+        # Re-anchor downstream waypoint index upon state transitions back to nominal mission
+        transitioned_from_ca = (
+            (prev_state == "State B.1" and cached["state"] == "State B.2") or
+            (prev_state == "State A.1" and cached["state"] == "State A.2")
+        )
+
+        if transitioned_from_ca:
             # Rejoin nearest unsailed segment ahead along the nominal mission
             best_idx = len(w_mission_os) - 1
             for idx in range(len(w_mission_os) - 1):
@@ -48,7 +53,8 @@ class SynchronousPipeline:
                 seg_len = float(np.hypot(seg_vec[0], seg_vec[1]))
                 proj = float(np.dot(v_ship, seg_vec)) / max(seg_len, 1e-4)
 
-                if proj < seg_len:
+                # Segment is ahead if the projection has not reached the end of the segment
+                if proj < (seg_len - 0.5):
                     best_idx = idx + 1
                     break
             cached["wp_idx"] = max(1, best_idx)
