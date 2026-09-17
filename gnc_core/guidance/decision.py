@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from typing import Optional, Tuple
 import numpy as np
+import time
 from shapely.geometry import LineString
 
 from gnc_core.config.vessel_params import VesselParams
@@ -233,6 +234,8 @@ class DecisionLayer:
             if min_dist >= (d_safe * 1.5) and curr_dist > (d_safe * 1.5):
                 return np.copy(w_os), 0.0, 1.0, "State A.2"
 
+            t_start_a1 = time.perf_counter()
+
             best_cost = float("inf")
             best_chi = 0.0
             best_p = 1.0
@@ -276,6 +279,12 @@ class DecisionLayer:
             cls._w_evasive_latched = np.vstack([x_os[:2], W_evade, remaining_wps])
             cls._mode_a_active = True
             cls._p_evasive_latched = best_p
+
+            calc_duration_ms = (time.perf_counter() - t_start_a1) * 1000.0
+            print(
+                f"\033[93m[State A.1 Route Plan] Computation Time: {calc_duration_ms:6.2f} ms\033[0m"
+            )
+            
             return cls._w_evasive_latched, 0.0, best_p, "State A.1"
 
         # ----------------------------------------------------------------------

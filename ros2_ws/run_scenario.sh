@@ -4,7 +4,7 @@
 SCENARIO=${1:-"case01"}
 TAU=${2:-0.5}
 SHARE_INTENT=${3:-True}
-T_ADVANCE=${4:-15.0}
+ROUTE_INTERVAL=${4:-3.0}  # Replaced T_ADVANCE with ROUTE_INTERVAL
 SPEED_FACTOR=${5:-1.0}
 AUTO_CLOSE=${6:-False}  # Default is False for single manual runs
 
@@ -14,7 +14,7 @@ echo "=========================================================="
 echo "Scenario     : ${SCENARIO}"
 echo "Latency (tau): ${TAU} s"
 echo "Share Intent : ${SHARE_INTENT}"
-echo "T_advance    : ${T_ADVANCE} s before TCPA"
+echo "Broadcast Int: ${ROUTE_INTERVAL} s"
 echo "Auto Close   : ${AUTO_CLOSE}"
 echo "=========================================================="
 
@@ -26,6 +26,6 @@ ros2 launch own_ship run_scenario.launch.py \
     scenario:=$SCENARIO \
     tau:=$TAU \
     share_intent:=$SHARE_INTENT \
-    t_advance:=$T_ADVANCE \
+    route_interval:=$ROUTE_INTERVAL \
     speed_factor:=$SPEED_FACTOR \
     auto_close:=$AUTO_CLOSE

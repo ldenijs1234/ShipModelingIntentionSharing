@@ -74,8 +74,10 @@ class LivePlotterNode(Node):
         self.declare_parameter("scenario", "case01")
         self.declare_parameter("mode", False)
         self.declare_parameter("latency", 0.0)
-        self.declare_parameter("interval", 3.0)
+        self.declare_parameter("interval", 5.0)
         self.declare_parameter("auto_close", False)
+
+        self.sim_interval = float(self.get_parameter("interval").value)
 
         self.scenario_name = str(self.get_parameter("scenario").value).lower()
         mode_val = self.get_parameter("mode").value

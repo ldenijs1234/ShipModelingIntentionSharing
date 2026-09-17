@@ -28,22 +28,22 @@ class TSSimulatorNode(Node):
 
         self.declare_parameter('scenario', 'case01')
         self.declare_parameter('share_intent', True)
-        self.declare_parameter('t_advance', 15.0)
+        self.declare_parameter('route_interval', 3.0)
         self.declare_parameter('speed_factor', 1.0)
 
         scenario_name = self.get_parameter('scenario').value
         config = load_scenario(scenario_name)
 
         self.share_intent = bool(self.get_parameter('share_intent').value)
-        self.t_advance = float(self.get_parameter('t_advance').value)
+        self.route_interval = float(self.get_parameter('route_interval').value)
         self.speed_factor = max(float(self.get_parameter('speed_factor').value), 0.1)
 
         self.dt = 0.05  # 20 Hz simulation integration step
         self.u_nominal = float(config['ts_nominal_speed'])
         self.w_mission_ts = config['ts_mission_wps'].copy()
         self.wp_idx = 1
-        
-        # Map config [x, y, psi, u, v, r] to internal dynamics state [x, y, psi, r, b, u]
+
+        # Internal dynamics state [x, y, psi, r, b, u]
         raw_state = config['ts_initial_state']
         self.internal_state = np.array([
             raw_state[0],  # X
@@ -56,44 +56,39 @@ class TSSimulatorNode(Node):
 
         self.os_state = None
         self.intent_broadcasted = False
+        self.effective_t_advance = None
+        self.sim_finished = False
 
-        # ITU-R M.1371 Table 1 Dynamic AIS interval tracking
+        # ITU-R M.1371 Table 1 dynamic AIS interval tracking
         self.sim_time = 0.0
-        self.last_ais_tx_time = -999.0
-        # Buffer up to 30 seconds of heading history at 20 Hz (600 steps)
+        self.last_ais_tx_time = 0.0
         self.heading_history = deque(maxlen=int(30.0 / self.dt))
 
+        # ROS Publishers and Subscribers
         self.state_pub = self.create_publisher(VesselKinematics, '/ts/state_vector', 10)
         self.route_pub = self.create_publisher(RouteIntent, '/ts/route_true', 10)
-        
+
         self.os_sub = self.create_subscription(
             Float64MultiArray, '/os/state_vector', self.os_state_callback, 10
         )
 
         dt_sim_timer = self.dt / self.speed_factor
-        dt_route_timer = 0.1 / self.speed_factor
+        dt_route_timer = self.route_interval / self.speed_factor
 
-        # 20 Hz loop runs simulation and publishes AIS dynamic reports when due
         self.sim_timer = self.create_timer(dt_sim_timer, self.step_gnc_pipeline)
         self.route_timer = self.create_timer(dt_route_timer, self.publish_route)
 
         self.publish_current_state()
 
-        mode = f"WITH intent (t_advance = {self.t_advance}s)" if self.share_intent else "WITHOUT intent"
+        mode = f"WITH intent (Interval = {self.route_interval}s)" if self.share_intent else "WITHOUT intent"
         self.get_logger().info(
-            f"TS Simulator running for [{scenario_name}] ({mode}) at {self.speed_factor}x speed "
-            f"with ITU-R M.1371-6 dynamic AIS intervals."
+            f"TS Simulator running for [{scenario_name}] ({mode}) at {self.speed_factor}x speed."
         )
 
     def os_state_callback(self, msg: Float64MultiArray):
         self.os_state = np.array(msg.data, dtype=np.float64)
 
     def get_itu_reporting_interval(self) -> float:
-        """
-        Calculates nominal reporting interval per ITU-R M.1371-6 Table 1:
-        - SOG <= 14 knots: 10.0 s
-        - SOG <= 14 knots and changing course (> 5 deg diff from 30s mean): 3.333 s (3 1/3 s)
-        """
         current_psi = self.internal_state[2]
         self.heading_history.append(current_psi)
 
@@ -102,13 +97,11 @@ class TSSimulatorNode(Node):
                 np.mean(np.sin(self.heading_history)),
                 np.mean(np.cos(self.heading_history))
             ))
-            # Angular course change relative to 30-second window
             delta_course = abs((current_psi - mean_psi + np.pi) % (2.0 * np.pi) - np.pi)
             is_changing_course = delta_course > np.radians(5.0)
         else:
             is_changing_course = False
 
-        # Speed conversion: 1 m/s = 1.94384 knots
         sog_knots = float(self.internal_state[5]) * 1.94384
 
         if sog_knots <= 14.0:
@@ -131,7 +124,7 @@ class TSSimulatorNode(Node):
             u_ts * np.cos(self.internal_state[2]),
             u_ts * np.sin(self.internal_state[2])
         ])
-        
+
         u_os = self.os_state[3]
         v_os = np.array([
             u_os * np.cos(self.os_state[2]),
@@ -147,6 +140,9 @@ class TSSimulatorNode(Node):
         return float(tcpa)
 
     def publish_current_state(self):
+        if self.sim_finished:
+            return
+
         msg = VesselKinematics()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.vessel_mmsi = 244000002
@@ -159,93 +155,91 @@ class TSSimulatorNode(Node):
         self.state_pub.publish(msg)
 
     def step_gnc_pipeline(self):
-        # 1. Continuous Guidance & Control (20 Hz)
-        x_sensor = np.array([
-            self.internal_state[0],
-            self.internal_state[1],
-            self.internal_state[2],
-            self.internal_state[5],  # u
-            0.0,                     # v
-            self.internal_state[3]   # r
-        ], dtype=np.float64)
-
-        max_wp_idx = max(len(self.w_mission_ts) - 1, 1)
-        self.wp_idx = min(self.wp_idx, max_wp_idx)
-
-        psi_los, _, next_wp_idx = LOSGuidance.compute_heading_reference(
-            x_os=x_sensor,
-            w_active=self.w_mission_ts,
-            current_wp_idx=self.wp_idx
-        )
-        self.wp_idx = min(next_wp_idx, max_wp_idx)
-
+        # 1. Guidance & Control
         dist_to_final = float(np.linalg.norm(self.internal_state[0:2] - self.w_mission_ts[-1, 0:2]))
-        u_target = 0.0 if dist_to_final <= VesselParams.D_m else self.u_nominal
 
-        u_c, tau_c, _ = Autopilot.compute_control(
-            x_os=x_sensor,
-            psi_wp=psi_los,
-            psi_ca_reactive=0.0,
-            u_nominal=u_target
-        )
+        if self.sim_finished:
+            # Vessel is docked: clamp velocities to zero
+            self.internal_state[3] = 0.0  # r
+            self.internal_state[5] = 0.0  # u
+        else:
+            x_sensor = np.array([
+                self.internal_state[0],
+                self.internal_state[1],
+                self.internal_state[2],
+                self.internal_state[5],  # u
+                0.0,                     # v
+                self.internal_state[3]   # r
+            ], dtype=np.float64)
 
-        inputs = np.array([tau_c, u_c], dtype=np.float64)
-        self.internal_state = VesselDynamics.rk4(
-            x=self.internal_state,
-            inputs=inputs,
-            dt=self.dt
-        )
+            max_wp_idx = max(len(self.w_mission_ts) - 1, 1)
+            self.wp_idx = min(self.wp_idx, max_wp_idx)
 
-        self.sim_time += self.dt
+            psi_los, _, next_wp_idx = LOSGuidance.compute_heading_reference(
+                x_os=x_sensor,
+                w_active=self.w_mission_ts,
+                current_wp_idx=self.wp_idx
+            )
+            self.wp_idx = min(next_wp_idx, max_wp_idx)
 
-        # 2. Discrete AIS Dynamic State Broadcast per ITU-R M.1371-6 Table 1
+            # Slow down cleanly near target
+            if dist_to_final <= 0.4:
+                u_target = 0.0
+            elif dist_to_final <= 2.0:
+                u_target = self.u_nominal * (dist_to_final / 2.0)
+            else:
+                u_target = self.u_nominal
+
+            u_c, tau_c, _ = Autopilot.compute_control(
+                x_os=x_sensor,
+                psi_wp=psi_los,
+                psi_ca_reactive=0.0,
+                u_nominal=u_target
+            )
+
+            inputs = np.array([tau_c, u_c], dtype=np.float64)
+            self.internal_state = VesselDynamics.rk4(
+                x=self.internal_state,
+                inputs=inputs,
+                dt=self.dt
+            )
+
+            self.sim_time += self.dt
+
+            # Check if TS has arrived and stopped
+            if dist_to_final <= 0.4 and abs(self.internal_state[5]) < 0.05:
+                self.sim_finished = True
+                self.internal_state[5] = 0.0
+                self.internal_state[3] = 0.0
+                self.publish_current_state()
+                self.get_logger().info("\033[94m[TS] Reached terminal waypoint and stopped.\033[0m")
+
+        # 2. Discrete AIS dynamic broadcast (continue transmitting resting state)
         req_interval = self.get_itu_reporting_interval()
         if (self.sim_time - self.last_ais_tx_time) >= req_interval:
             self.publish_current_state()
-            msg = VesselKinematics()
-            msg.header.stamp = self.get_clock().now().to_msg()
-            msg.vessel_mmsi = 244000002
-            msg.x = float(self.internal_state[0])
-            msg.y = float(self.internal_state[1])
-            msg.psi = float(self.internal_state[2])
-            msg.u = float(self.internal_state[5])
-            msg.v = 0.0
-            msg.r = float(self.internal_state[3])
-            self.state_pub.publish(msg)
             self.last_ais_tx_time = self.sim_time
 
     def publish_route(self):
-        if not self.share_intent:
+        if not self.share_intent or self.sim_finished:
             return
 
         tcpa = self.calculate_tcpa()
-
-        if not self.intent_broadcasted and tcpa <= self.t_advance:
-            route_msg = RouteIntent()
-            route_msg.header.stamp = self.get_clock().now().to_msg()
-            route_msg.vessel_mmsi = 244000002
-            route_msg.planned_speed = float(self.u_nominal)
-
-            for wp in self.w_mission_ts:
-                p = Point()
-                p.x, p.y, p.z = float(wp[0]), float(wp[1]), 0.0
-                route_msg.route.append(p)
-
-            self.route_pub.publish(route_msg)
+        if not self.intent_broadcasted:
+            self.effective_t_advance = tcpa
             self.intent_broadcasted = True
-            self.get_logger().info(
-                f">>> INTENT BROADCAST: Triggered at TCPA = {tcpa:.2f}s (Threshold: {self.t_advance}s)"
-            )
-        elif self.intent_broadcasted:
-            route_msg = RouteIntent()
-            route_msg.header.stamp = self.get_clock().now().to_msg()
-            route_msg.vessel_mmsi = 244000002
-            route_msg.planned_speed = float(self.u_nominal)
-            for wp in self.w_mission_ts:
-                p = Point()
-                p.x, p.y, p.z = float(wp[0]), float(wp[1]), 0.0
-                route_msg.route.append(p)
-            self.route_pub.publish(route_msg)
+
+        route_msg = RouteIntent()
+        route_msg.header.stamp = self.get_clock().now().to_msg()
+        route_msg.vessel_mmsi = 244000002
+        route_msg.planned_speed = float(self.u_nominal)
+
+        for wp in self.w_mission_ts:
+            p = Point()
+            p.x, p.y, p.z = float(wp[0]), float(wp[1]), 0.0
+            route_msg.route.append(p)
+
+        self.route_pub.publish(route_msg)
 
 
 def main(args=None):
@@ -253,12 +247,13 @@ def main(args=None):
     node = TSSimulatorNode()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, rclpy.executors.ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
+
 
 if __name__ == '__main__':
     main()
