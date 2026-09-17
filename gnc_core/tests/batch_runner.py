@@ -11,47 +11,63 @@ from gnc_core.tests.kpi_evaluator import ScenarioKPIEvaluator
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 def plot_summary_latency_curve(df_scenario: pd.DataFrame, scenario_name: str):
-  """Plots Delta J vs.
+    """
+    Plots Delta J vs. Latency, clamping safety violations to an explicit 
+    failure ceiling to clearly show the tipping point.
+    """
+    plt.figure(figsize=(9, 5.5))
+    ceiling = 0.5  # Explicit ceiling for safety violations
+    y_top = 0.15
+    plt.ylim(-0.55, y_top + 0.05)
+    plt.axhline(0.0, color="black", linestyle="--", label="RA Baseline (ΔJ = 0)")
 
-  Latency for each update interval Delta T_IS, showing the tipping point
-  crossing at Delta J = 0.
-  """
-  plt.figure(figsize=(8, 5))
+    for dt, group in df_scenario.groupby("interval"):
+        sorted_group = group.sort_values(by="latency").copy()
+        
+        # Detect breaches and clamp infinite values
+        breaches = sorted_group["r_min"] < VesselParams.DCPA_safe
+        clamped_delta_j = np.where(breaches, y_top, sorted_group["delta_j"])
 
-  # Group by update interval to draw one curve per Delta T_IS
-  for dt, group in df_scenario.groupby("interval"):
-    sorted_group = group.sort_values(by="latency")
-    plt.plot(
-        sorted_group["latency"],
-        sorted_group["delta_j"],
-        marker="o",
-        linewidth=2.0,
-        label=r"$\Delta T_{\mathrm{IS}} = $" + f"{dt:.1f} s",
-    )
+        # Plot the main curve
+        valid_mask = ~breaches
+        plt.plot(
+            sorted_group["latency"][valid_mask],
+            clamped_delta_j[valid_mask],
+            marker="o",
+            linewidth=2.0,
+            label=rf"$\Delta T_{{\mathrm{{IS}}}} = {dt:.1f}\,$s",
+        )
 
-  # Baseline reference (Delta J = 0 is RA equivalent)
-  plt.axhline(
-      0.0,
-      color="black",
-      linestyle="--",
-      linewidth=1.2,
-      label=r"RA Baseline ($\Delta J = 0$)",
-  )
-  plt.title(
-      f"Latency Tipping Point Analysis ({scenario_name.upper()})",
-      fontweight="bold",
-  )
-  plt.xlabel(r"Communication Latency $\tau$ [s]")
-  plt.ylabel(r"Performance Differential $\Delta J = J_{\mathrm{IS}} - 1.0$")
-  plt.grid(True, linestyle=":", alpha=0.6)
-  plt.legend()
-  plt.tight_layout()
+        # Highlight safety violations with red crosses
+        if breaches.any():
+          plt.scatter(
+              sorted_group["latency"][breaches],
+              np.full(np.sum(breaches), y_top),
+              color="crimson",
+              marker="X",
+              s=110,
+              zorder=5,
+              label=r"Safety Breach ($r_{\mathrm{min}} < d_{\mathrm{safe}}$)"
+          )
 
-  os.makedirs("results_plots", exist_ok=True)
-  plt.savefig(
-      f"results_plots/{scenario_name}_latency_tipping_curve.png", dpi=300
-  )
-  plt.show()
+    # RA Baseline
+    plt.axhline(0.0, color="black", linestyle="--", linewidth=1.4, label=r"RA Baseline ($\Delta J = 0$)")
+    
+    # Boundary threshold zone
+    plt.axhspan(0.0, ceiling * 1.1, color="red", alpha=0.08, label="IS Inferior / Failed Region")
+    plt.axhspan(-0.6, 0.0, color="green", alpha=0.05, label="IS Superior Region")
+
+    plt.title(f"Latency Tipping Point & Safety Boundary ({scenario_name.upper()})", fontweight="bold", fontsize=11)
+    plt.xlabel(r"Communication Latency $\tau$ [s]", fontsize=10)
+    plt.ylabel(r"Performance Differential $\Delta J$", fontsize=10)
+    plt.ylim(-0.55, ceiling * 1.1)
+    plt.grid(True, linestyle=":", alpha=0.6)
+    plt.legend(loc="upper left", framealpha=0.9)
+    plt.tight_layout()
+
+    os.makedirs("results_plots", exist_ok=True)
+    plt.savefig(f"results_plots/{scenario_name}_latency_tipping_curve.png", dpi=300)
+    plt.show()
 
 
 def run_dynamic_batch(log_dir=None, d_safe=VesselParams.DCPA_safe):

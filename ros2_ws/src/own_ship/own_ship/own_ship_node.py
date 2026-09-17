@@ -264,36 +264,55 @@ class OSTransceiverNode(Node):
         )
         self.telemetry_pub.publish(telem_msg)
 
-        # 5. Stop Condition
-        if self.x_ts_est is not None:
-            os_at_goal = dist_to_final <= 0.5
-            os_stopped = abs(self.internal_state[5]) < 0.05 and os_at_goal
+        # 5. Stop Condition & Completion Check
+        final_wp = self.w_mission_os[-1, :2]
+        prev_wp = self.w_mission_os[-2, :2] if len(self.w_mission_os) >= 2 else (final_wp - np.array([1.0, 0.0]))
 
-            if self.w_ts_delayed is not None and len(self.w_ts_delayed) > 0:
-                ts_goal = self.w_ts_delayed[-1]
-            else:
-                ts_goal = self.w_mission_ts_nominal[-1, :2]
+        leg_vec = final_wp - prev_wp
+        leg_len = np.linalg.norm(leg_vec)
+        leg_unit = leg_vec / max(leg_len, 1e-3)
 
-            dist_ts_to_goal = float(np.linalg.norm(self.x_ts_est[:2] - ts_goal[:2]))
-            ts_at_goal = dist_ts_to_goal <= 0.6
-            ts_stopped = (abs(self.x_ts_est[3]) < 0.08) and ts_at_goal
+        # Distance to final waypoint and forward projection past the line
+        dist_to_final = float(np.linalg.norm(self.internal_state[:2] - final_wp))
+        dist_past_goal = float(np.dot(self.internal_state[:2] - final_wp, leg_unit))
 
-            if os_stopped and ts_stopped and not self.sim_finished:
+        # 1. Classical arrival: inside acceptance circle and stopped
+        os_reached_and_stopped = (dist_to_final <= 0.6) and (abs(self.internal_state[5]) < 0.05)
+
+        # 2. Overshoot failsafe: vessel has sailed past the terminal waypoint plane
+        os_overshot = dist_past_goal > 1.0
+
+        os_at_goal = os_reached_and_stopped or os_overshot
+
+        # TS arrival check
+        if self.w_ts_delayed is not None and len(self.w_ts_delayed) > 0:
+            ts_goal = self.w_ts_delayed[-1]
+        else:
+            ts_goal = self.w_mission_ts_nominal[-1, :2]
+
+        dist_ts_to_goal = float(np.linalg.norm(self.x_ts_est[:2] - ts_goal[:2])) if self.x_ts_est is not None else 0.0
+        ts_at_goal = dist_ts_to_goal <= 1.0
+
+        sim_timed_out = getattr(self, "t_sim_elapsed", 0.0) > 160.0
+
+        if (os_at_goal and ts_at_goal) or sim_timed_out:
+            if not self.sim_finished:
                 self.sim_finished = True
-                self.get_logger().info("\033[92mBoth vessels arrived at terminal waypoints.\033[0m")
-                
+                if sim_timed_out:
+                    self.get_logger().warn("\033[93mRun terminated by failsafe simulation time limit.\033[0m")
+                else:
+                    self.get_logger().info("\033[92mBoth vessels arrived at terminal waypoints.\033[0m")
+
                 if self.timer:
                     self.timer.cancel()
 
                 self.save_run_log()
 
-                # Show metrics only during manual interactive runs
                 if not self.auto_close:
                     self.plot_encounter_metrics()
 
-                # If batch / auto_close is enabled, shut down cleanly so the launch event fires
                 if self.auto_close:
-                    self.get_logger().info("[OS] Auto-close active. Triggering node shutdown.")
+                    self.get_logger().info("[OS] Auto-close active. Triggering clean shutdown.")
                     self.destroy_node()
                     rclpy.shutdown()
 
