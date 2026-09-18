@@ -20,6 +20,7 @@ from gnc_core.imazu_cases.scenario_loader import load_scenario
 from gnc_core.guidance.los import LOSGuidance
 from gnc_core.control.autopilot import Autopilot
 from gnc_core.models.vessel_dynamics import VesselDynamics
+from gnc_core.tests.kpi_evaluator import resolve_effective_interval
 
 
 class TSSimulatorNode(Node):
@@ -35,13 +36,27 @@ class TSSimulatorNode(Node):
         config = load_scenario(scenario_name)
 
         self.share_intent = bool(self.get_parameter('share_intent').value)
-        self.route_interval = float(self.get_parameter('route_interval').value)
+        raw_route_interval = float(self.get_parameter('route_interval').value)
         self.speed_factor = max(float(self.get_parameter('speed_factor').value), 0.1)
 
         self.dt = 0.05  # 20 Hz simulation integration step
         self.u_nominal = float(config['ts_nominal_speed'])
         self.w_mission_ts = config['ts_mission_wps'].copy()
         self.wp_idx = 1
+
+        # --- Enforce ITU-R M.1371 Regulatory Clamp ---
+        num_waypoints = len(self.w_mission_ts)
+        self.route_interval, self.min_itu_interval = resolve_effective_interval(
+            input_interval=raw_route_interval,
+            num_waypoints=num_waypoints
+        )
+
+        if self.route_interval > raw_route_interval:
+            self.get_logger().warn(
+                f"\033[93m[TS Comms] Requested interval ({raw_route_interval:.1f}s) violates "
+                f"ITU 20 slots/min limit for {num_waypoints} WPs! "
+                f"Clamped to minimum compliant: {self.route_interval:.1f}s\033[0m"
+            )
 
         # Internal dynamics state [x, y, psi, r, b, u]
         raw_state = config['ts_initial_state']
@@ -80,7 +95,11 @@ class TSSimulatorNode(Node):
 
         self.publish_current_state()
 
-        mode = f"WITH intent (Interval = {self.route_interval}s)" if self.share_intent else "WITHOUT intent"
+        mode = (
+            f"WITH intent (Effective Interval = {self.route_interval:.1f}s, ITU min = {self.min_itu_interval:.1f}s)"
+            if self.share_intent
+            else "WITHOUT intent"
+        )
         self.get_logger().info(
             f"TS Simulator running for [{scenario_name}] ({mode}) at {self.speed_factor}x speed."
         )

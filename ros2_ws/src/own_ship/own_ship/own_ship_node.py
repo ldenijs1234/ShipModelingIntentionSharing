@@ -21,6 +21,7 @@ from gnc_core.config.vessel_params import VesselParams
 from gnc_core.imazu_cases.scenario_loader import load_scenario
 from gnc_core.simulation.pipeline import SynchronousPipeline
 from gnc_core.navigation.state_estimation import StateEstimation
+from gnc_core.tests.kpi_evaluator import resolve_effective_interval
 
 
 class OSTransceiverNode(Node):
@@ -55,6 +56,18 @@ class OSTransceiverNode(Node):
         self.w_mission_ts_nominal = config['ts_mission_wps'].copy()
         self.canal_polygons = config.get('canal_polygons', None)
 
+        raw_interval = float(self.get_parameter("interval").value)
+        num_ts_wps = len(self.w_mission_ts_nominal)
+        self.sim_interval, self.min_itu_interval = resolve_effective_interval(
+            input_interval=raw_interval, num_waypoints=num_ts_wps
+        )
+
+        if self.sim_interval > raw_interval:
+            self.get_logger().warn(
+                f"\033[93m[OS] Configured interval ({raw_interval:.1f}s) clamped "
+                f"to ITU-compliant interval: {self.sim_interval:.1f}s\033[0m"
+            )
+
         # Internal state format [x, y, psi, r, b, u]
         raw_state = config['os_initial_state']
         self.internal_state = np.array([
@@ -84,6 +97,10 @@ class OSTransceiverNode(Node):
         self.t_intent_shared: Optional[float] = None
         self.sim_finished = False
 
+        # --- Intent Timing Diagnostics ---
+        self.t_first_intent_rx: Optional[float] = None
+        self.t_advance: Optional[float] = None
+
         StateEstimation.reset()
 
         # Cache structure for SynchronousPipeline
@@ -104,6 +121,8 @@ class OSTransceiverNode(Node):
         self.hist_tcpa = []
         self.hist_range = []
         self.hist_os_pos = []
+        self.hist_os_psi = []
+        self.hist_os_u = []
         self.hist_ts_pos = []
         self.hist_r = []
 
@@ -140,8 +159,43 @@ class OSTransceiverNode(Node):
 
     def ts_route_callback(self, msg: RouteIntent):
         self.w_ts_delayed = np.array([[pt.x, pt.y] for pt in msg.route], dtype=np.float64)
-        if self.t_intent_shared is None:
-            self.t_intent_shared = self.sim_time
+        
+        # First-time reception trigger and t_advance calculation
+        if self.t_first_intent_rx is None:
+            self.t_first_intent_rx = float(self.sim_time)
+            self.t_intent_shared = float(self.sim_time)
+
+            if self.x_ts_est is not None and abs(self.x_ts_est[0]) < 900.0:
+                p_os = self.internal_state[:2]
+                psi_os = self.internal_state[2]
+                u_os = self.internal_state[5]
+                v_os_vec = np.array([u_os * np.cos(psi_os), u_os * np.sin(psi_os)])
+
+                p_ts = self.x_ts_est[:2]
+                psi_ts = self.x_ts_est[2]
+                u_ts = self.x_ts_est[3]
+                v_ts_vec = np.array([u_ts * np.cos(psi_ts), u_ts * np.sin(psi_ts)])
+
+                dp = p_ts - p_os
+                dv = v_ts_vec - v_os_vec  # Fixed: changed v_ts to v_ts_vec
+                dv_sq = float(np.dot(dv, dv))
+
+                if dv_sq > 1e-4:
+                    tcpa_relative = -float(np.dot(dp, dv)) / dv_sq
+                    self.t_advance = tcpa_relative
+                else:
+                    self.t_advance = np.nan
+            else:
+                self.t_advance = np.nan
+
+            t_adv_str = f"{self.t_advance:.2f}s" if np.isfinite(self.t_advance) else "N/A"
+            self.get_logger().info(
+                f"\033[95m[INTENT RX] First packet received at t={self.t_first_intent_rx:.2f}s | "
+                f"t_advance (TCPA margin): {t_adv_str}\033[0m"
+            )
+
+        # Forward the intent to the plotter only after receiving it legitimately in range
+        self.ts_perceived_route_pub.publish(msg)
 
         # Forward the intent to the plotter only after receiving it legitimately in range
         self.ts_perceived_route_pub.publish(msg)
@@ -263,6 +317,8 @@ class OSTransceiverNode(Node):
         self.hist_tcpa.append(tcpa_val)
         self.hist_range.append(current_range)
         self.hist_os_pos.append(self.internal_state[:2].copy())
+        self.hist_os_psi.append(float(self.internal_state[2]))
+        self.hist_os_u.append(float(self.internal_state[5]))
         self.hist_ts_pos.append(ts_pos)
         self.hist_r.append(float(self.internal_state[3]))
 
@@ -314,7 +370,7 @@ class OSTransceiverNode(Node):
         dist_ts_to_goal = float(np.linalg.norm(self.x_ts_est[:2] - ts_goal[:2])) if self.x_ts_est is not None else 0.0
         ts_at_goal = dist_ts_to_goal <= 1.0
 
-        sim_timed_out = getattr(self, "t_sim_elapsed", 0.0) > 160.0
+        sim_timed_out = getattr(self, "sim_time", 0.0) > 160.0
 
         if (os_at_goal and ts_at_goal) or sim_timed_out:
             if not self.sim_finished:
@@ -355,21 +411,31 @@ class OSTransceiverNode(Node):
 
         t_arr = np.array(self.hist_time)
         os_pos = np.array(self.hist_os_pos)
+        os_psi = np.array(self.hist_os_psi)
+        os_u = np.array(self.hist_os_u)
         ts_pos = np.array(self.hist_ts_pos)
         r_arr = np.array(self.hist_r)
+
+        t_adv_val = self.t_advance if self.t_advance is not None else np.nan
+        t_rx_val = self.t_first_intent_rx if self.t_first_intent_rx is not None else np.nan
 
         np.savez(
             filepath,
             t=t_arr,
             os_pos=os_pos,
-            os_psi=np.zeros_like(t_arr),
+            os_psi=os_psi,
             os_r=r_arr,
+            os_u=os_u,
             ts_pos=ts_pos,
             nominal_wps=np.array(self.w_mission_os),
+            w_ts_delayed=np.array(self.w_ts_delayed) if self.w_ts_delayed is not None else np.array([]),
             scenario=scenario_name,
             mode=self.sim_mode,
             latency=self.sim_latency,
             interval=self.sim_interval,
+            # Intent timing metrics
+            t_advance=t_adv_val,
+            t_first_intent_rx=t_rx_val,
         )
         self.get_logger().info(
             f"\033[92m[OS] Successfully saved full run log ({len(t_arr)} points, duration: {t_arr[-1]:.1f}s): {filepath}\033[0m"

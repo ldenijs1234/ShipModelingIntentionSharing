@@ -1,5 +1,6 @@
 import glob
 import os
+import matplotlib.cm as cm
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -17,12 +18,7 @@ import pandas as pd
 
 
 def plot_summary_latency_curve(df_scenario: pd.DataFrame, scenario_name: str):
-    """Plots Delta J vs.
-
-    Latency dynamically across multiple intervals without horizontal offsets
-    on breach markers.
-    """
-    fig, ax = plt.subplots(figsize=(8.5, 5.0), dpi=100)
+    fig, ax = plt.subplots(figsize=(9.5, 5.5), dpi=100)
 
     df = df_scenario.copy()
     df["interval_round"] = df["interval"].round(1)
@@ -35,45 +31,43 @@ def plot_summary_latency_curve(df_scenario: pd.DataFrame, scenario_name: str):
     ax.axhspan(y_min, 0.0, color="#f0fdf4", alpha=0.5, zorder=1)
 
     ax.text(
-        3.2,
+        4.5,
         0.04,
         "IS INFERIOR (Worse than RA)",
-        fontsize=8,
+        fontsize=8.5,
         fontweight="bold",
         color="#991b1b",
-        alpha=0.8,
+        alpha=0.75,
     )
     ax.text(
-        3.2,
+        4.5,
         -0.04,
         "IS SUPERIOR (Better than RA)",
-        fontsize=8,
+        fontsize=8.5,
         fontweight="bold",
         color="#166534",
-        alpha=0.8,
+        alpha=0.75,
         va="top",
     )
 
-    # 2. RA Parity Baseline
+    # 2. Baseline
     ax.axhline(
         0.0,
-        color="#374151",
+        color="#1f2937",
         linestyle="--",
-        linewidth=1.2,
+        linewidth=1.3,
         label=r"RA Baseline ($\Delta J = 0$)",
         zorder=2,
     )
 
-    # Color palette for distinct intervals
-    interval_palette = {
-        5.0: "#0284c7",  # Sky Blue
-        7.0: "#f59e0b",  # Amber
-        10.0: "#10b981",  # Emerald Green
-        15.0: "#8b5cf6",  # Violet
-        20.0: "#ec4899",  # Pink
-    }
+    # Dynamic Color Assignment across any number of intervals
+    unique_intervals = np.sort(df["interval_round"].unique())
+    num_intervals = len(unique_intervals)
+    # Using a vibrant colormap spanning all intervals smoothly
+    colors = cm.turbo(np.linspace(0.08, 0.92, num_intervals))
+    color_map = {dt: colors[i] for i, dt in enumerate(unique_intervals)}
 
-    # Loop strictly across all unique broadcast intervals in the dataset
+    # Loop through each interval group
     for dt_val, group in df.groupby("interval_round"):
         sorted_group = group.sort_values(by="latency")
         tau = sorted_group["latency"].to_numpy()
@@ -82,7 +76,7 @@ def plot_summary_latency_curve(df_scenario: pd.DataFrame, scenario_name: str):
         breached = (
             (sorted_group["r_min"] < 1.0).to_numpy() | ~np.isfinite(delta_j)
         )
-        color = interval_palette.get(dt_val, "#64748b")
+        color = color_map[dt_val]
 
         # 3. Continuous Safe Segments
         safe_indices = np.where(~breached)[0]
@@ -97,27 +91,26 @@ def plot_summary_latency_curve(df_scenario: pd.DataFrame, scenario_name: str):
                         delta_j[seg],
                         marker="o",
                         color=color,
-                        linewidth=1.8,
-                        markersize=5,
+                        linewidth=1.7,
+                        markersize=4.5,
                         label=(
-                            rf"$\Delta T_{{\mathrm{{IS}}}} = {dt_val:.1f}\,$s"
+                            rf"$\Delta T_{{\mathrm{{IS}}}} = {dt_val:.0f}\,$s"
                             if i == 0
                             else None
                         ),
                         zorder=3,
                     )
 
-        # 4. Safety Breaches (Placed exactly at their true tau coordinate)
+        # 4. Breaches (True coordinates, no label clutter in legend)
         if np.any(breached):
             ax.scatter(
                 tau[breached],
                 np.full(np.sum(breached), y_breach_ceiling),
                 color=color,
                 marker="X",
-                s=85,
+                s=70,
                 edgecolor="black",
-                linewidth=0.8,
-                label=rf"Breach ($\Delta T={dt_val:.0f}\,$s)",
+                linewidth=0.6,
                 zorder=4,
             )
             for t_b in tau[breached]:
@@ -127,20 +120,22 @@ def plot_summary_latency_curve(df_scenario: pd.DataFrame, scenario_name: str):
                     y_breach_ceiling,
                     color=color,
                     linestyle=":",
-                    linewidth=1.1,
-                    alpha=0.7,
+                    linewidth=0.9,
+                    alpha=0.65,
                     zorder=2,
                 )
 
         # 5. Dynamic Tipping Line per Interval
-        tipping_tau = None
-        tipping_label = None
-
         breach_indices = np.where(breached)[0]
         if len(breach_indices) > 0:
-            tipping_tau = float(tau[breach_indices[0]])
-            tipping_label = (
-                rf"Limit ($\Delta T={dt_val:.0f}\,$s, $\tau={tipping_tau:.1f}\,$s)"
+            tip_tau = float(tau[breach_indices[0]])
+            ax.axvline(
+                tip_tau,
+                color=color,
+                linestyle="-.",
+                linewidth=1.0,
+                alpha=0.6,
+                zorder=2,
             )
         else:
             valid_mask = np.isfinite(delta_j)
@@ -152,44 +147,58 @@ def plot_summary_latency_curve(df_scenario: pd.DataFrame, scenario_name: str):
                 t0, t1 = v_tau[idx], v_tau[idx + 1]
                 y0, y1 = v_dj[idx], v_dj[idx + 1]
                 if abs(y1 - y0) > 1e-6:
-                    tipping_tau = float(t0 + (-y0) * (t1 - t0) / (y1 - y0))
-                    tipping_label = rf"Tipping ($\Delta T={dt_val:.0f}\,$s, $\tau\approx{tipping_tau:.2f}\,$s)"
+                    tip_tau = float(t0 + (-y0) * (t1 - t0) / (y1 - y0))
+                    ax.axvline(
+                        tip_tau,
+                        color=color,
+                        linestyle="-.",
+                        linewidth=1.0,
+                        alpha=0.6,
+                        zorder=2,
+                    )
 
-        if tipping_tau is not None:
-            ax.axvline(
-                tipping_tau,
-                color=color,
-                linestyle="-.",
-                linewidth=1.2,
-                alpha=0.85,
-                label=tipping_label,
-                zorder=2,
-            )
+    # 6. Global Breaches Legend Dummy
+    ax.scatter(
+        [],
+        [],
+        color="#ef4444",
+        marker="X",
+        s=70,
+        edgecolor="black",
+        label=r"Breach ($r_{\mathrm{min}} < 1.0\,$m)",
+    )
 
     # Formatting and Layout
     max_tau = float(np.nanmax(df["latency"].to_numpy()))
     ax.set_title(
         f"Latency Sensitivity & Tipping Point Analysis ({scenario_name.upper()})",
-        fontsize=11,
+        fontsize=11.5,
         fontweight="bold",
         pad=10,
     )
-    ax.set_xlabel(r"Communication Latency $\tau$ [s]", fontsize=9.5)
+    ax.set_xlabel(r"Communication Latency $\tau$ [s]", fontsize=10)
     ax.set_ylabel(
         r"Performance Differential $\Delta J = J_{\mathrm{IS}} - 1.0$",
-        fontsize=9.5,
+        fontsize=10,
     )
-    ax.set_xlim(-0.3, max_tau + 0.5)
+    ax.set_xlim(-0.3, max_tau + 0.3)
     ax.set_ylim(y_min, y_max)
     ax.set_xticks(np.arange(0, int(max_tau) + 1, 1))
 
     ax.grid(True, linestyle=":", alpha=0.55, zorder=0)
+
+    # 2-column compact legend in upper-left to prevent vertical overflow
     ax.legend(
-        loc="upper left", fontsize=8, framealpha=0.9, edgecolor="#cbd5e1"
+        loc="upper left",
+        ncol=2,
+        fontsize=8,
+        framealpha=0.92,
+        edgecolor="#cbd5e1",
+        handletextpad=0.4,
+        columnspacing=0.8,
     )
 
     plt.tight_layout()
-
     os.makedirs("results_plots", exist_ok=True)
     out_path = f"results_plots/{scenario_name}_latency_clean.png"
     plt.savefig(out_path, dpi=300)
