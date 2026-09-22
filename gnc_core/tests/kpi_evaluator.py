@@ -36,8 +36,9 @@ def compute_asm_telecom_kpis(num_waypoints: int, configured_interval: float) -> 
         slots = int(np.ceil(payload_bytes / 28.0))
 
     # 4. Regulatory checks (20 slots/min RATDMA mobile station limit)
-    min_compliant_interval = slots * 3.0
-    actual_slots_per_min = (slots * 60.0) / configured_interval if configured_interval > 0.0 else 0.0
+    min_compliant_interval = (slots * 3.0) / np.sqrt(30)
+    configured_interval_full = configured_interval * np.sqrt(30)
+    actual_slots_per_min = (slots * 60.0) / configured_interval_full if configured_interval_full > 0.0 else 0.0
     is_vdl_compliant = (actual_slots_per_min <= 20.0) and (slots <= 3)
 
     return {
