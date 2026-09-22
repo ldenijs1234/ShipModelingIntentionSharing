@@ -189,9 +189,6 @@ class DecisionLayer:
         # ----------------------------------------------------------------------
         # Mode A: Shared Intent Route Available
         # ----------------------------------------------------------------------
-        # ----------------------------------------------------------------------
-        # Mode A: Shared Intent Route Available
-        # ----------------------------------------------------------------------
         if w_ts_delayed is not None and len(w_ts_delayed) >= 2:
             # 1. Check exit conditions ONLY after vessels have truly passed each other
             if cls._mode_a_active:
@@ -265,7 +262,7 @@ class DecisionLayer:
                         best_p = p_cand
 
             # Head-On / Starboard evasion offset
-            req_offset = 2.0  # Guarantees clearing TS (y=0) while keeping inside canal wall (y=3.0)
+            req_offset = 2.0  
 
             P_cpa = os_traj[k_cpa]
             s_cpa = s_os + (u_os * k_cpa * dt_sim)
@@ -297,7 +294,7 @@ class DecisionLayer:
 
             calc_duration_ms = (time.perf_counter() - t_start_a1) * 1000.0
             print(
-                f"\033[93m[State A.1 Route Plan] Computation Time: {calc_duration_ms:6.2f} ms\033[0m",
+                f"\033[93m[State A.1 SB-MPC] Opt Chi: {np.degrees(best_chi):.1f}° | Opt P: {best_p:.2f} | Cost: {best_cost:.2f} ({calc_duration_ms:5.2f} ms)\033[0m",
                 flush=True
             )
 

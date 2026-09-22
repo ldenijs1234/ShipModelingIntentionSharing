@@ -33,7 +33,7 @@ CASE02_CONFIG = {
     # TS route: South along west lane, then turns southeast at x = 5.0 m
     "ts_mission_wps": np.array([
         [ 20.0, -1.0],
-        [  6.0, -1.0],
+        [  8.0, -1.0],
         [-20.0, 10.0]
     ], dtype=np.float64),
 
