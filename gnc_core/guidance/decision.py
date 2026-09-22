@@ -16,7 +16,7 @@ class DecisionLayer:
 
     k_chi_stb = 5.0
     k_chi_port = 5.2
-    k_p = 50.0
+    k_p = 10.0
     
     # New penalty weights defined matching LaTeX
     k_safety = 1000.0
@@ -48,7 +48,7 @@ class DecisionLayer:
         u_nominal: float = 0.45,
         canal_polygons = None,
         scenario: str = "Unknown"
-    ) -> Tuple[float, float, int]:
+    ) -> Tuple[float, float, int, np.ndarray, np.ndarray]:
         
         u_os = (float(x_os[3]) if abs(x_os[3]) > 0.05 else float(u_nominal)) * p_cand
         psi_cand = x_os[2] + chi
@@ -60,48 +60,51 @@ class DecisionLayer:
         os_x = x_os[0] + vx * t_steps
         os_y = x_os[1] + vy * t_steps
 
-        # 1. Safety Cost (J_safety) - Fixed to strict piece-wise zero tail
+        # 1. Collision Hazard (Expanded for continuous gradient)
         dists = np.hypot(os_x - ts_traj[:, 0], os_y - ts_traj[:, 1])
         min_idx = int(np.argmin(dists))
         min_dist = float(dists[min_idx])
 
-        if min_dist <= d_safe:
+        if min_dist <= (d_safe * 2.5):
             j_safety = cls.k_safety * ((d_safe / max(min_dist, 0.05)) ** 4.0)
         else:
             j_safety = 0.0
 
-        # 2. Grounding Cost (J_grounding)
+        # 2. Grounding Penalty (Truncated to prevent infinite trap)
         j_grounding = 0.0
         if canal_polygons is not None:
-            traj_line = LineString(np.column_stack((os_x, os_y)))
-            min_static_dist = traj_line.distance(canal_polygons)
+            eval_steps = min(steps, min_idx + int(15.0 / dt_sim))
+            eval_steps = max(eval_steps, 10)  
             
-            # Add this: Hard physical boundary truncation (Thesis Eq 2.12 constraints)
+            traj_line = LineString(np.column_stack((os_x[:eval_steps], os_y[:eval_steps])))
+            min_static_dist = float(traj_line.distance(canal_polygons))
+            
             if min_static_dist <= VesselParams.R_lateral:
-                return float("inf"), min_dist, min_idx
-                
-            if min_static_dist <= VesselParams.d_safe_static:
-                j_grounding = cls.k_grounding * ((VesselParams.d_safe_static / (min_static_dist + 0.05)) ** 2.5)
+                j_grounding = 50000.0  
+            elif min_static_dist <= VesselParams.d_safe_static:
+                j_grounding = cls.k_grounding * ((VesselParams.d_safe_static / max(min_static_dist, 0.05)) ** 2.5)
 
-        # 3. Control Effort Cost (J_control & J_speed)
-        k_w = cls.k_chi_stb if chi <= 0.0 else cls.k_chi_port
+        # 3. Control Cost (NED Translation: chi > 0 is Starboard)
+        k_w = cls.k_chi_stb if chi > 0.0 else cls.k_chi_port
         j_control = k_w * (chi**2)
         j_speed = cls.k_p * (1.0 - p_cand)
 
-        # 4. COLREGs Cost (J_colregs)
+        # 4. COLREGs Cost (Akdag's True Spatial Translation)
         j_colregs = 0.0
         if scenario != "Unknown":
-            # Vectorized mapping to [-180, 180] relative bearing
+            # Calculate the predicted relative bearing (beta) along the trajectory
             phi_array = np.arctan2(ts_traj[:, 1] - os_y, ts_traj[:, 0] - os_x)
             beta_array = np.degrees(phi_array - psi_cand)
             beta_array = (beta_array + 180.0) % 360.0 - 180.0
 
+            # In NED, beta > 0 means the Target is on your Starboard bow.
+            # Following Akdag: Penalize any maneuver that fails to put the target on your Port bow.
             if scenario == "Head-On":
-                mu_array = (beta_array <= 13.0)
+                # If we turn Port, TS stays on Starboard bow. Penalized.
+                mu_array = (beta_array >= 0.0) 
             elif scenario in ["Crossing_A", "Crossing_B"]:
-                mu_array = (beta_array <= 0.0)
-            elif scenario == "Overtaking":
-                mu_array = (np.abs(beta_array) <= 22.5)
+                # If we cross ahead (turn Port), TS stays on Starboard bow. Penalized.
+                mu_array = (beta_array >= 0.0) 
             else:
                 mu_array = np.zeros_like(beta_array, dtype=bool)
 
@@ -109,8 +112,8 @@ class DecisionLayer:
                 j_colregs = cls.k_colregs
 
         total_cost = j_safety + j_grounding + j_control + j_speed + j_colregs
-        return total_cost, min_dist, min_idx
-
+        return total_cost, min_dist, min_idx, os_x, os_y
+    
     @classmethod
     def _sample_route(
         cls, wps: np.ndarray, pos: np.ndarray, speed: float, steps: int, dt: float
@@ -239,21 +242,21 @@ class DecisionLayer:
             os_traj, s_os = cls._sample_route(w_os_base, x_os[:2], u_os, steps, dt_sim)
             dists = np.hypot(os_traj[:, 0] - ts_traj[:, 0], os_traj[:, 1] - ts_traj[:, 1])
             k_cpa = int(np.argmin(dists))
-            min_dist = float(dists[k_cpa])
-
+            min_dist = float(dists[k_cpa]) 
+            
             # Trigger condition: Only activate if an actual CPA risk exists
             if min_dist >= (d_safe * 1.5) and curr_dist > (d_safe * 1.5):
                 return np.copy(w_os), 0.0, 1.0, "State A.2"
 
             t_start_a1 = time.perf_counter()
-
             best_cost = float("inf")
             best_chi = 0.0
             best_p = 1.0
 
+            # Akdag SB-MPC discrete optimization loop
             for chi in cls.chi_candidates:
                 for p_cand in cls.p_candidates:
-                    cost, _, _ = cls._evaluate_candidate_hazard(
+                    cost, d_min, k_min, ox, oy = cls._evaluate_candidate_hazard(
                         x_os, chi, p_cand, ts_traj, steps, dt_sim, d_safe, u_nominal, canal_polygons, scenario
                     )
                     if cost < best_cost:
@@ -261,44 +264,79 @@ class DecisionLayer:
                         best_chi = chi
                         best_p = p_cand
 
-            # Head-On / Starboard evasion offset
-            req_offset = 2.0  
-
-            P_cpa = os_traj[k_cpa]
-            s_cpa = s_os + (u_os * k_cpa * dt_sim)
-
-            diffs_base = np.diff(w_os_base[:, :2], axis=0)
-            seg_lens_base = np.hypot(diffs_base[:, 0], diffs_base[:, 1])
-            accum = 0.0
-            cpa_seg_idx = 0
-            for idx, length in enumerate(seg_lens_base):
-                if accum + length >= s_cpa:
-                    cpa_seg_idx = idx
-                    break
-                accum += length
-
-            seg_dir = diffs_base[cpa_seg_idx] / max(seg_lens_base[cpa_seg_idx], 1e-4)
-            n_stb = np.array([-seg_dir[1], seg_dir[0]])  # Starboard normal in NED (x = North, y = East)
-
-            # Latch a stable evasive polyline: [Start, Evade, Rejoin]
-            evasion_direction = np.sign(best_chi) if abs(best_chi) > 1e-3 else 1.0
-            W_evade = P_cpa + (req_offset * evasion_direction) * n_stb
-            
-            # Anchor start of evasive leg at initial decision point, not continuously shifting with x_os
-            rejoin_idx = min(cpa_seg_idx + 1, len(w_os_base) - 1)
-            remaining_wps = w_os_base[rejoin_idx:, :2]
-
-            cls._w_evasive_latched = np.vstack([x_os[:2], W_evade, remaining_wps])
-            cls._mode_a_active = True
-            cls._p_evasive_latched = best_p
+            cls._chi_ca_latched = float(best_chi)
+            cls._p_ca_latched = float(best_p)
 
             calc_duration_ms = (time.perf_counter() - t_start_a1) * 1000.0
             print(
-                f"\033[93m[State A.1 SB-MPC] Opt Chi: {np.degrees(best_chi):.1f}° | Opt P: {best_p:.2f} | Cost: {best_cost:.2f} ({calc_duration_ms:5.2f} ms)\033[0m",
+                f"\033[93m[State A.1 Route Plan] Opt Chi: {np.degrees(best_chi):.1f}° | Cost: {best_cost:.2f} | {calc_duration_ms:6.2f} ms\033[0m",
                 flush=True
             )
 
-            return cls._w_evasive_latched, 0.0, best_p, "State A.1"
+            # ------------------------------------------------------------------
+            # The User's Geometric Triangle Waypoint Method (True Route Anchor)
+            # ------------------------------------------------------------------
+            if abs(best_chi) > 1e-3 or best_p < 0.99:
+                P_cpa = os_traj[k_cpa]
+                
+                # 1. Grab WP1 and WP3 directly from the sampled trajectory 
+                # This guarantees they are exactly on the nominal mission, even if it bends.
+                tactical_tcpa = 20.0
+                k_offset = int(tactical_tcpa / dt_sim)
+                
+                k_w1 = max(0, k_cpa - k_offset)
+                W_1 = os_traj[k_w1]
+                
+                k_w3 = min(len(os_traj) - 1, k_cpa + k_offset)
+                W_3 = os_traj[k_w3]
+
+                # 2. WP2: Placed at the exact distance from WP1 to CPA, rotated by chi
+                v_nom = P_cpa - W_1
+                D_actual = float(np.hypot(v_nom[0], v_nom[1]))
+                
+                if D_actual > 1e-3:
+                    u_nom = v_nom / D_actual
+                else:
+                    u_nom = np.array([1.0, 0.0])
+                    
+                cos_chi = np.cos(best_chi)
+                sin_chi = np.sin(best_chi)
+                
+                # Apply rotation in NED frame
+                u_evade = np.array([
+                    u_nom[0] * cos_chi - u_nom[1] * sin_chi,
+                    u_nom[0] * sin_chi + u_nom[1] * cos_chi
+                ])
+                
+                W_2 = W_1 + u_evade * D_actual
+                
+                # 3. Splice the remaining original waypoints safely downstream of W_3
+                s_w3 = s_os + (u_os * k_w3 * dt_sim)
+                
+                diffs_base = np.diff(w_os_base[:, :2], axis=0)
+                seg_lens_base = np.hypot(diffs_base[:, 0], diffs_base[:, 1])
+                
+                rejoin_idx = len(w_os_base) - 1
+                accum_rejoin = 0.0
+                for idx, length in enumerate(seg_lens_base):
+                    accum_rejoin += length
+                    if accum_rejoin > s_w3:
+                        rejoin_idx = idx + 1
+                        break
+                        
+                rejoin_idx = min(rejoin_idx, len(w_os_base) - 1)
+                remaining_wps = w_os_base[rejoin_idx:, :2]
+
+                # Stitch it all together: 
+                # [Current Pos] -> [W_1: true mission] -> [W_2: apex] -> [W_3: true mission] -> [Remaining]
+                cls._w_evasive_latched = np.vstack([x_os[:2], W_1, W_2, W_3, remaining_wps])
+            else:
+                cls._w_evasive_latched = np.copy(w_os_base)
+
+            cls._mode_a_active = True
+            cls._p_evasive_latched = best_p
+            
+            return cls._w_evasive_latched, 0.0, cls._p_evasive_latched, "State A.1"
 
         # ----------------------------------------------------------------------
         # Mode B: Reactive Fallback (No Intent)
