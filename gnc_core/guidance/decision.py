@@ -16,7 +16,7 @@ class DecisionLayer:
 
     k_chi_stb = 5.0
     k_chi_port = 5.2
-    k_p = 10.0
+    k_p = 50.0
     
     # New penalty weights defined matching LaTeX
     k_safety = 1000.0
@@ -281,10 +281,11 @@ class DecisionLayer:
                 accum += length
 
             seg_dir = diffs_base[cpa_seg_idx] / max(seg_lens_base[cpa_seg_idx], 1e-4)
-            n_stb = np.array([seg_dir[1], -seg_dir[0]])  # Starboard normal in NED (x = North, y = East)
+            n_stb = np.array([-seg_dir[1], seg_dir[0]])  # Starboard normal in NED (x = North, y = East)
 
             # Latch a stable evasive polyline: [Start, Evade, Rejoin]
-            W_evade = P_cpa + req_offset * n_stb
+            evasion_direction = np.sign(best_chi) if abs(best_chi) > 1e-3 else 1.0
+            W_evade = P_cpa + (req_offset * evasion_direction) * n_stb
             
             # Anchor start of evasive leg at initial decision point, not continuously shifting with x_os
             rejoin_idx = min(cpa_seg_idx + 1, len(w_os_base) - 1)
@@ -347,21 +348,34 @@ class DecisionLayer:
             if curr_dist < d_safe * 0.8:
                 p_ca = 0.0
 
-            # --- NEW: REACTIVE GROUNDING AVOIDANCE ---
+            # --- IMPROVED REACTIVE GROUNDING AVOIDANCE ---
             if canal_polygons is not None:
-                # Project the OS position 5 seconds into the future using the proposed heading
+                # Test the desired evasive turn
                 vx = u_os * np.cos(x_os[2] + psi_ca)
                 vy = u_os * np.sin(x_os[2] + psi_ca)
                 future_pos = (x_os[0] + vx * 5.0, x_os[1] + vy * 5.0)
                 
-                # Check distance to canal walls along this projected path
                 projected_line = LineString([(x_os[0], x_os[1]), future_pos])
                 d_static_future = float(projected_line.distance(canal_polygons))
 
-                # If the evasive turn puts us into the wall, kill speed and straighten out
+                # If the full turn points into the bank, reduce angle before killing speed
                 if d_static_future <= VesselParams.d_safe_static:
-                    p_ca = 0.0    # Emergency stop to yield
-                    psi_ca = 0.0  # Re-align parallel to the channel to minimize footprint
+                    # Scale down the turn angle iteratively or clamp to canal-safe heading
+                    for scale_factor in [0.75, 0.5, 0.25]:
+                        test_psi = psi_ca * scale_factor
+                        test_line = LineString([
+                            (x_os[0], x_os[1]),
+                            (x_os[0] + u_os * np.cos(x_os[2] + test_psi) * 5.0,
+                             x_os[1] + u_os * np.sin(x_os[2] + test_psi) * 5.0)
+                        ])
+                        if test_line.distance(canal_polygons) > VesselParams.d_safe_static:
+                            psi_ca = test_psi
+                            p_ca = 0.5  # Modest speed reduction, not a total dead stop
+                            break
+                    else:
+                        # Only full emergency stop if no safe turn exists in the fairway
+                        p_ca = 0.0
+                        psi_ca = 0.0
             # -----------------------------------------
 
             return np.copy(w_os), float(psi_ca), float(p_ca), "State B.1"

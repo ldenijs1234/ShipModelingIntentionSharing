@@ -13,7 +13,7 @@ def generate_launch_description():
     route_interval_arg = DeclareLaunchArgument('route_interval', default_value='3.0')
     speed_factor_arg = DeclareLaunchArgument('speed_factor', default_value='1.0')
     auto_close_arg = DeclareLaunchArgument('auto_close', default_value='False')
-    intent_range_arg = DeclareLaunchArgument('intent_range', default_value='15.0')
+    min_intent_range_arg = DeclareLaunchArgument('min_intent_range', default_value='10.0')
     headless_arg = DeclareLaunchArgument('headless', default_value='False', description='Disable live GUI plotting')
 
     # 1. Target Ship Node
@@ -54,7 +54,7 @@ def generate_launch_description():
             'interval': LaunchConfiguration('route_interval'),
             'speed_factor': LaunchConfiguration('speed_factor'),
             'auto_close': LaunchConfiguration('auto_close'),
-            'intent_range': LaunchConfiguration('intent_range'),
+            'min_intent_range': LaunchConfiguration('min_intent_range'),
         }],
         on_exit=[EmitEvent(event=Shutdown())]
     )
@@ -82,7 +82,7 @@ def generate_launch_description():
         route_interval_arg,
         speed_factor_arg,
         auto_close_arg,
-        intent_range_arg,
+        min_intent_range_arg,
         headless_arg,
         target_ship_node,
         latency_bridge_node,

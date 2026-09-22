@@ -22,7 +22,86 @@ from gnc_core.control.autopilot import Autopilot
 from gnc_core.models.vessel_dynamics import VesselDynamics
 from gnc_core.tests.kpi_evaluator import resolve_effective_interval
 
+class TSHorizonSlicer:
+    def __init__(self, full_route_xy: np.ndarray, time_scale: float = 5.4772):
+        self.route = full_route_xy
+        self.time_scale = time_scale
+        # 5 minutes full-scale converted to simulation time (~54.77 s)
+        self.t_horizon_sim = 300.0 / self.time_scale
 
+        # Precompute cumulative segment distances along the full route
+        dists = np.hypot(np.diff(self.route[:, 0]), np.diff(self.route[:, 1]))
+        self.s_cumulative = np.insert(np.cumsum(dists), 0, 0.0)
+
+    def extract_5min_intent(
+        self, current_x: float, current_y: float, speed_u: float
+    ) -> list[tuple[float, float]]:
+        """Extracts all dynamic intention waypoints covering 5 min into the future."""
+        if len(self.route) < 2 or speed_u <= 0.01:
+            return [(float(current_x), float(current_y))]
+
+        # 1. Project current position onto the route to find true continuous path distance (s_now)
+        min_dist = float('inf')
+        s_now = 0.0
+        
+        for i in range(len(self.route) - 1):
+            p0 = self.route[i]
+            p1 = self.route[i+1]
+            
+            seg_vec = p1 - p0
+            seg_len_sq = np.dot(seg_vec, seg_vec)
+            
+            if seg_len_sq < 1e-6:
+                continue
+                
+            pt_vec = np.array([current_x, current_y]) - p0
+            t = np.dot(pt_vec, seg_vec) / seg_len_sq
+            t_clamped = np.clip(t, 0.0, 1.0)
+            
+            proj_pt = p0 + t_clamped * seg_vec
+            dist = np.linalg.norm(np.array([current_x, current_y]) - proj_pt)
+            
+            if dist < min_dist:
+                min_dist = dist
+                s_now = self.s_cumulative[i] + (t_clamped * np.sqrt(seg_len_sq))
+
+        # 2. Compute the 5-minute path distance horizon
+        dist_horizon = speed_u * self.t_horizon_sim
+        s_end = min(s_now + dist_horizon, self.s_cumulative[-1])
+
+        intent_wps = []
+        
+        # 3. The intent MUST start exactly at the vessel's current coordinate
+        intent_wps.append((float(current_x), float(current_y)))
+
+        # 4. Gather pre-planned structural waypoints strictly inside the forward window
+        in_window_indices = np.where(
+            (self.s_cumulative > s_now + 1e-3) & (self.s_cumulative < s_end - 1e-3)
+        )[0]
+
+        for idx in in_window_indices:
+            intent_wps.append((float(self.route[idx, 0]), float(self.route[idx, 1])))
+
+        # 5. Interpolate the exact 5-min boundary point (if we haven't exhausted the route)
+        if s_end > s_now + 1e-3:
+            seg_idx = np.searchsorted(self.s_cumulative, s_end) - 1
+            seg_idx = np.clip(seg_idx, 0, len(self.route) - 2)
+
+            s0 = self.s_cumulative[seg_idx]
+            s1 = self.s_cumulative[seg_idx + 1]
+            seg_len = s1 - s0
+
+            ratio = (s_end - s0) / seg_len if seg_len > 1e-5 else 0.0
+            p0 = self.route[seg_idx]
+            p1 = self.route[seg_idx + 1]
+
+            x_end = p0[0] + ratio * (p1[0] - p0[0])
+            y_end = p0[1] + ratio * (p1[1] - p0[1])
+
+            intent_wps.append((float(x_end), float(y_end)))
+
+        return intent_wps
+    
 class TSSimulatorNode(Node):
     def __init__(self):
         super().__init__('ts_simulator_node')
@@ -44,8 +123,29 @@ class TSSimulatorNode(Node):
         self.w_mission_ts = config['ts_mission_wps'].copy()
         self.wp_idx = 1
 
+        # Internal dynamics state [x, y, psi, r, b, u]
+        raw_state = config['ts_initial_state']
+        self.internal_state = np.array([
+            raw_state[0],  # X
+            raw_state[1],  # Y
+            raw_state[2],  # psi
+            raw_state[5],  # r (yaw rate)
+            0.0,           # b (heading bias)
+            raw_state[3]   # u (surge velocity)
+        ], dtype=np.float64)
+
+        # Initialize the dynamic horizon slicer
+        self.ts_slicer = TSHorizonSlicer(self.w_mission_ts)
+        
+        # Determine realistic initial waypoint count for the 5-minute window
+        initial_intent = self.ts_slicer.extract_5min_intent(
+            current_x=self.internal_state[0],
+            current_y=self.internal_state[1],
+            speed_u=self.u_nominal
+        )
+
         # --- Enforce ITU-R M.1371 Regulatory Clamp ---
-        num_waypoints = len(self.w_mission_ts)
+        num_waypoints = len(initial_intent)
         self.route_interval, self.min_itu_interval = resolve_effective_interval(
             input_interval=raw_route_interval,
             num_waypoints=num_waypoints
@@ -57,17 +157,6 @@ class TSSimulatorNode(Node):
                 f"ITU 20 slots/min limit for {num_waypoints} WPs! "
                 f"Clamped to minimum compliant: {self.route_interval:.1f}s\033[0m"
             )
-
-        # Internal dynamics state [x, y, psi, r, b, u]
-        raw_state = config['ts_initial_state']
-        self.internal_state = np.array([
-            raw_state[0],  # X
-            raw_state[1],  # Y
-            raw_state[2],  # psi
-            raw_state[5],  # r (yaw rate)
-            0.0,           # b (heading bias)
-            raw_state[3]   # u (surge velocity)
-        ], dtype=np.float64)
 
         self.os_state = None
         self.intent_broadcasted = False
@@ -253,7 +342,13 @@ class TSSimulatorNode(Node):
         route_msg.vessel_mmsi = 244000002
         route_msg.planned_speed = float(self.u_nominal)
 
-        for wp in self.w_mission_ts:
+        intent_wps = self.ts_slicer.extract_5min_intent(
+            current_x=self.internal_state[0],
+            current_y=self.internal_state[1],
+            speed_u=self.internal_state[5]
+        )
+
+        for wp in intent_wps:
             p = Point()
             p.x, p.y, p.z = float(wp[0]), float(wp[1]), 0.0
             route_msg.route.append(p)

@@ -23,7 +23,86 @@ from gnc_core.simulation.pipeline import SynchronousPipeline
 from gnc_core.navigation.state_estimation import StateEstimation
 from gnc_core.tests.kpi_evaluator import resolve_effective_interval
 
+class TSHorizonSlicer:
+    def __init__(self, full_route_xy: np.ndarray, time_scale: float = 5.4772):
+        self.route = full_route_xy
+        self.time_scale = time_scale
+        # 5 minutes full-scale converted to simulation time (~54.77 s)
+        self.t_horizon_sim = 300.0 / self.time_scale
 
+        # Precompute cumulative segment distances along the full route
+        dists = np.hypot(np.diff(self.route[:, 0]), np.diff(self.route[:, 1]))
+        self.s_cumulative = np.insert(np.cumsum(dists), 0, 0.0)
+
+    def extract_5min_intent(
+        self, current_x: float, current_y: float, speed_u: float
+    ) -> list[tuple[float, float]]:
+        """Extracts all dynamic intention waypoints covering 5 min into the future."""
+        if len(self.route) < 2 or speed_u <= 0.01:
+            return [(float(current_x), float(current_y))]
+
+        # 1. Project current position onto the route to find true continuous path distance (s_now)
+        min_dist = float('inf')
+        s_now = 0.0
+        
+        for i in range(len(self.route) - 1):
+            p0 = self.route[i]
+            p1 = self.route[i+1]
+            
+            seg_vec = p1 - p0
+            seg_len_sq = np.dot(seg_vec, seg_vec)
+            
+            if seg_len_sq < 1e-6:
+                continue
+                
+            pt_vec = np.array([current_x, current_y]) - p0
+            t = np.dot(pt_vec, seg_vec) / seg_len_sq
+            t_clamped = np.clip(t, 0.0, 1.0)
+            
+            proj_pt = p0 + t_clamped * seg_vec
+            dist = np.linalg.norm(np.array([current_x, current_y]) - proj_pt)
+            
+            if dist < min_dist:
+                min_dist = dist
+                s_now = self.s_cumulative[i] + (t_clamped * np.sqrt(seg_len_sq))
+
+        # 2. Compute the 5-minute path distance horizon
+        dist_horizon = speed_u * self.t_horizon_sim
+        s_end = min(s_now + dist_horizon, self.s_cumulative[-1])
+
+        intent_wps = []
+        
+        # 3. The intent MUST start exactly at the vessel's current coordinate
+        intent_wps.append((float(current_x), float(current_y)))
+
+        # 4. Gather pre-planned structural waypoints strictly inside the forward window
+        in_window_indices = np.where(
+            (self.s_cumulative > s_now + 1e-3) & (self.s_cumulative < s_end - 1e-3)
+        )[0]
+
+        for idx in in_window_indices:
+            intent_wps.append((float(self.route[idx, 0]), float(self.route[idx, 1])))
+
+        # 5. Interpolate the exact 5-min boundary point (if we haven't exhausted the route)
+        if s_end > s_now + 1e-3:
+            seg_idx = np.searchsorted(self.s_cumulative, s_end) - 1
+            seg_idx = np.clip(seg_idx, 0, len(self.route) - 2)
+
+            s0 = self.s_cumulative[seg_idx]
+            s1 = self.s_cumulative[seg_idx + 1]
+            seg_len = s1 - s0
+
+            ratio = (s_end - s0) / seg_len if seg_len > 1e-5 else 0.0
+            p0 = self.route[seg_idx]
+            p1 = self.route[seg_idx + 1]
+
+            x_end = p0[0] + ratio * (p1[0] - p0[0])
+            y_end = p0[1] + ratio * (p1[1] - p0[1])
+
+            intent_wps.append((float(x_end), float(y_end)))
+
+        return intent_wps
+    
 class OSTransceiverNode(Node):
     def __init__(self):
         super().__init__('own_ship_node')
@@ -34,7 +113,7 @@ class OSTransceiverNode(Node):
         self.declare_parameter('interval', 5.0)
         self.declare_parameter('speed_factor', 1.0)
         self.declare_parameter('auto_close', False)
-        self.declare_parameter('intent_range', 15.0)
+        self.declare_parameter('min_intent_range', 10.0)
 
         # Parse mode
         mode_val = self.get_parameter('mode').value
@@ -45,7 +124,7 @@ class OSTransceiverNode(Node):
         scenario_name = self.get_parameter('scenario').value
         self.speed_factor = max(float(self.get_parameter('speed_factor').value), 0.1)
         self.auto_close = bool(self.get_parameter('auto_close').value)
-        self.intent_range = float(self.get_parameter('intent_range').value)
+        self.min_intent_range = float(self.get_parameter('min_intent_range').value)
 
         config = load_scenario(scenario_name)
 
@@ -55,18 +134,6 @@ class OSTransceiverNode(Node):
         self.w_mission_os = config['os_mission_wps'].copy()
         self.w_mission_ts_nominal = config['ts_mission_wps'].copy()
         self.canal_polygons = config.get('canal_polygons', None)
-
-        raw_interval = float(self.get_parameter("interval").value)
-        num_ts_wps = len(self.w_mission_ts_nominal)
-        self.sim_interval, self.min_itu_interval = resolve_effective_interval(
-            input_interval=raw_interval, num_waypoints=num_ts_wps
-        )
-
-        if self.sim_interval > raw_interval:
-            self.get_logger().warn(
-                f"\033[93m[OS] Configured interval ({raw_interval:.1f}s) clamped "
-                f"to ITU-compliant interval: {self.sim_interval:.1f}s\033[0m"
-            )
 
         # Internal state format [x, y, psi, r, b, u]
         raw_state = config['os_initial_state']
@@ -92,6 +159,30 @@ class OSTransceiverNode(Node):
             ], dtype=np.float64)
         else:
             self.x_ts_est = None
+
+        # Setup dynamic horizon slicer to estimate initial target ship waypoint count
+        self.ts_slicer = TSHorizonSlicer(self.w_mission_ts_nominal)
+        if self.x_ts_est is not None:
+            initial_intent = self.ts_slicer.extract_5min_intent(
+                current_x=self.x_ts_est[0],
+                current_y=self.x_ts_est[1],
+                speed_u=self.x_ts_est[3]
+            )
+            initial_num_waypoints = len(initial_intent)
+        else:
+            initial_num_waypoints = len(self.w_mission_ts_nominal)
+
+        num_ts_wps = initial_num_waypoints
+        raw_interval = float(self.get_parameter("interval").value)
+        self.sim_interval, self.min_itu_interval = resolve_effective_interval(
+            input_interval=raw_interval, num_waypoints=num_ts_wps
+        )
+
+        if self.sim_interval > raw_interval:
+            self.get_logger().warn(
+                f"\033[93m[OS] Configured interval ({raw_interval:.1f}s) clamped "
+                f"to ITU-compliant interval: {self.sim_interval:.1f}s\033[0m"
+            )        
 
         self.w_ts_delayed: Optional[np.ndarray] = None
         self.t_intent_shared: Optional[float] = None
@@ -215,19 +306,40 @@ class OSTransceiverNode(Node):
         if self.x_ts_est is not None:
             dist_to_ts = float(np.linalg.norm(self.internal_state[:2] - self.x_ts_est[:2]))
             
-            # Dynamic Intent Subscription based on Range
-            if dist_to_ts <= self.intent_range:
+            # --- Dynamic Subscription Range R_IS(t) ---
+            # Extract velocity vectors
+            u_os = self.internal_state[5]
+            psi_os = self.internal_state[2]
+            v_os = np.array([u_os * np.cos(psi_os), u_os * np.sin(psi_os)])
+
+            u_ts = self.x_ts_est[3]
+            psi_ts = self.x_ts_est[2]
+            v_ts = np.array([u_ts * np.cos(psi_ts), u_ts * np.sin(psi_ts)])
+
+            # Compute relative closing velocity magnitude ||v_OS - v_TS||
+            v_rel_norm = float(np.linalg.norm(v_os - v_ts))
+            
+            # T_tactical = 5 minutes full-scale, scaled to Froude simulation time
+            t_tactical_sim = 300.0 / np.sqrt(30.0) 
+            
+            # R_IS(t) = max(R_min, ||v_rel|| * T_tactical)
+            dynamic_r_is = max(self.min_intent_range, v_rel_norm * t_tactical_sim)
+
+            # Use standard dynamic range for CONNECTING
+            if dist_to_ts <= dynamic_r_is:
                 if self.ts_route_sub is None:
                     self.get_logger().info(
-                        f"\033[93m[OS] TS entered intent comms range ({dist_to_ts:.1f}m <= {self.intent_range}m). Subscribing to Intent.\033[0m"
+                        f"\033[93m[OS] TS entered intent comms range ({dist_to_ts:.1f}m <= {dynamic_r_is:.1f}m). Subscribing to Intent.\033[0m"
                     )
                     self.ts_route_sub = self.create_subscription(
                         RouteIntent, '/ts/route_delayed', self.ts_route_callback, 10
                     )
-            else:
+                    
+            # Use dynamic range + 20% hysteresis buffer for DISCONNECTING
+            elif dist_to_ts > (dynamic_r_is * 1.20):
                 if self.ts_route_sub is not None:
                     self.get_logger().info(
-                        f"\033[91m[OS] TS left intent comms range ({dist_to_ts:.1f}m > {self.intent_range}m). Dropping Intent.\033[0m"
+                        f"\033[91m[OS] TS left intent comms range ({dist_to_ts:.1f}m > {dynamic_r_is*1.20:.1f}m). Dropping Intent.\033[0m"
                     )
                     self.destroy_subscription(self.ts_route_sub)
                     self.ts_route_sub = None

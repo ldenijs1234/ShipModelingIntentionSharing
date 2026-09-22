@@ -7,7 +7,7 @@ SHARE_INTENT=${3:-True}
 ROUTE_INTERVAL=${4:-3.0}  # Replaced T_ADVANCE with ROUTE_INTERVAL
 SPEED_FACTOR=${5:-1.0}
 AUTO_CLOSE=${6:-False}  # Default is False for single manual runs
-INTENT_RANGE=${7:-15.0} # Communication range for intent sharing
+MIN_INTENT_RANGE=${7:-10.0} # Minimum communication range for intent sharing
 HEADLESS=${8:-False}    # Default is False for single manual runs
 
 WS_DIR="/mnt/c/Users/lars/Documents/Ship dynamics - Thesis Lars de Nijs/ros2_ws"
@@ -18,7 +18,7 @@ echo "Latency (tau): ${TAU} s"
 echo "Share Intent : ${SHARE_INTENT}"
 echo "Broadcast Int: ${ROUTE_INTERVAL} s"
 echo "Auto Close   : ${AUTO_CLOSE}"
-echo "Intent Range : ${INTENT_RANGE} m"
+echo "Minimum Intent Range : ${MIN_INTENT_RANGE} m"
 echo "=========================================================="
 
 source "${WS_DIR}/install/setup.bash"
@@ -33,5 +33,5 @@ ros2 launch own_ship run_scenario.launch.py \
     route_interval:=$ROUTE_INTERVAL \
     speed_factor:=$SPEED_FACTOR \
     auto_close:=$AUTO_CLOSE \
-    intent_range:=$INTENT_RANGE \
+    min_intent_range:=$MIN_INTENT_RANGE \
     headless:=$HEADLESS

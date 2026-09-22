@@ -75,9 +75,9 @@ class ScenarioKPIEvaluator:
         self,
         d_safe: float,
         nominal_waypoints: np.ndarray,
-        w_cte: float = 0.6,
-        w_ctrl: float = 0.2,
-        w_speed: float = 0.2,
+        w_cte: float = 1/3,
+        w_ctrl: float = 1/3,
+        w_speed: float = 1/3,
         u_nominal: float = 0.45,
     ):
         """

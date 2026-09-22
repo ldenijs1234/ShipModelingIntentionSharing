@@ -19,6 +19,7 @@ class VesselParams:
 
     # Actuator limits & gains
     tau_max = 1.5
+    tau_dot_max = 1.0
     u_max = 1.2
     u_min = -0.5
     mu_los = 1.5  # Lookahead factor
