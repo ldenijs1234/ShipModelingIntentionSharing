@@ -13,7 +13,7 @@ echo "Timestamp: $(date '+%Y-%m-%d %H:%M:%S')"
 echo "=========================================================="
 
 SCENARIOS=("case05")
-INTERVALS=(1.0 2.0 3.0 4.0 5.0 6.0 7.0 8.0 9.0 10.0)
+INTERVALS=(6.0)
 LATENCIES=(0.0 1.0 2.0 3.0 4.0 5.0 6.0 7.0 8.0 9.0 10.0)
 
 TOTAL_RUNS=$(( ${#SCENARIOS[@]} * (1 + ${#INTERVALS[@]} * ${#LATENCIES[@]}) ))
@@ -24,13 +24,13 @@ for SCENARIO in "${SCENARIOS[@]}"; do
     echo ">>> Running Baseline (RA) for ${SCENARIO}..."
     # Mode B: Baseline Reactive Avoidance (Run once per scenario)
     # Parameters: SCENARIO, TAU, SHARE_INTENT, INTERVAL, SPEED, AUTO_CLOSE, INTENT_RANGE, HEADLESS
-    ./run_scenario.sh "${SCENARIO}" 0.0 False 0.0 5.0 True 15.0 True
+    ./run_scenario.sh "${SCENARIO}" 0.0 False 0.0 5.0 True 15.0 False
 
     for INTERVAL in "${INTERVALS[@]}"; do
         for TAU in "${LATENCIES[@]}"; do
             CURRENT_RUN=$((CURRENT_RUN + 1))
             echo ">>> Running IS for ${SCENARIO} | Interval=${INTERVAL}s | Tau=${TAU}s..."
-            ./run_scenario.sh "${SCENARIO}" "${TAU}" True "${INTERVAL}" 5.0 True 15.0 True
+            ./run_scenario.sh "${SCENARIO}" "${TAU}" True "${INTERVAL}" 5.0 True 15.0 False
         done
     done
 done

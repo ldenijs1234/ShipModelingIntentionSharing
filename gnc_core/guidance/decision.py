@@ -403,4 +403,5 @@ class DecisionLayer:
 
             return np.copy(w_os), float(psi_ca), float(p_ca), "State B.1"
 
-        return np.copy(cls._w_nominal), 0.0, 1.0, "State B.2"
+        unsailed = cls._slice_path_forward(cls._w_nominal, x_os[:2])
+        return np.vstack([x_os[:2], unsailed]), 0.0, 1.0, "STAND_ON"
