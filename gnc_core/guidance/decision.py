@@ -34,8 +34,26 @@ class DecisionLayer:
     p_candidates = np.array([1.0, 0.5, 0.0])
 
     @classmethod
+    def _get_active_nominal_track(cls, path_wps: np.ndarray, pos: np.ndarray) -> np.ndarray:
+        """Slices the route to find the active segment while preserving the original track line."""
+        if len(path_wps) < 2:
+            return path_wps
+        
+        diffs = np.diff(path_wps[:, :2], axis=0)
+        for i in range(len(path_wps) - 1):
+            seg_dir = diffs[i]
+            v_to_wp = path_wps[i + 1, :2] - pos[:2]
+            # If the dot product is positive, the next waypoint is ahead of the ship
+            if np.dot(seg_dir, v_to_wp) > 0.0: 
+                # Return the array starting from 'i' (the waypoint IMMEDIATELY BEHIND the ship).
+                # This guarantees the controller uses the exact mathematical line of the channel.
+                return path_wps[i:]
+        
+        return path_wps[-2:] if len(path_wps) >= 2 else path_wps
+
+    @classmethod
     def _slice_path_forward(cls, path_wps: np.ndarray, pos: np.ndarray) -> np.ndarray:
-        """Slices a waypoint array to return only the points physically ahead of the vessel."""
+        """Slices dynamic evasive triangles to prevent turning back to an old latch point."""
         if len(path_wps) < 2:
             return path_wps
         
@@ -174,19 +192,24 @@ class DecisionLayer:
         if not cls._mode_a_active and not cls._mode_b_active:
             cls._w_nominal = np.copy(w_os)
 
+        nom = cls._w_nominal if cls._w_nominal is not None else w_os
+
         if x_ts is None:
             cls._mode_a_active = False
             cls._mode_b_active = False
-            return np.copy(w_os), 0.0, 1.0, "State B.2"
+            cls._w_evasive_latched = None
+            active_track = cls._get_active_nominal_track(nom, x_os[:2])
+            return active_track, 0.0, 1.0, "State B.2"
 
         u_os = float(x_os[3]) if abs(x_os[3]) > 0.05 else float(u_nominal)
         u_ts = float(x_ts[3]) if abs(x_ts[3]) > 0.05 else float(u_nominal)
 
-        # This previously returned State B.2 and triggered the backward steering bug when TS arrived at terminal WP
         if u_os < 0.10 or u_ts < 0.10:
             cls._mode_a_active = False
             cls._mode_b_active = False
-            return np.copy(w_os), 0.0, 1.0, "State B.2"
+            cls._w_evasive_latched = None
+            active_track = cls._get_active_nominal_track(nom, x_os[:2])
+            return active_track, 0.0, 1.0, "State B.2"
 
         d_safe = VesselParams.DCPA_safe
         curr_dist = float(np.hypot(x_os[0] - x_ts[0], x_os[1] - x_ts[1]))
@@ -208,8 +231,8 @@ class DecisionLayer:
 
             ts_traj, _ = cls._sample_route(w_ts_delayed, x_ts[:2], u_ts, steps, dt_sim)
 
-            unsailed_nominal = cls._slice_path_forward(cls._w_nominal, x_os[:2])
-            w_os_base = np.vstack([x_os[:2], unsailed_nominal])
+            # Preserve the channel line for the baseline projection
+            w_os_base = cls._get_active_nominal_track(nom, x_os[:2])
 
             os_traj, s_os = cls._sample_route(w_os_base, x_os[:2], u_os, steps, dt_sim)
             dists = np.hypot(os_traj[:, 0] - ts_traj[:, 0], os_traj[:, 1] - ts_traj[:, 1])
@@ -227,15 +250,19 @@ class DecisionLayer:
             if passed_cpa and separating:
                 cls._mode_a_active = False
                 cls._w_evasive_latched = None
-                return np.copy(w_os_base), 0.0, 1.0, "State A.2"
+                active_track = cls._get_active_nominal_track(nom, x_os[:2])
+                return active_track, 0.0, 1.0, "State A.2"
 
             threat_cleared = (min_dist >= d_safe * 2.0 and curr_dist > d_safe * 2.0)
             if threat_cleared:
                 cls._mode_a_active = False
                 cls._w_evasive_latched = None
-                return np.copy(w_os_base), 0.0, 1.0, "State A.2"
+                active_track = cls._get_active_nominal_track(nom, x_os[:2])
+                return active_track, 0.0, 1.0, "State A.2"
 
             if cls._mode_a_active and cls._w_evasive_latched is not None:
+                # Dynamically slice the latched triangle to prevent turning back, but append ship position
+                # so the maneuver stays locked to the ship's physical location
                 sliced_latched = cls._slice_path_forward(cls._w_evasive_latched, x_os[:2])
                 cls._w_evasive_latched = np.vstack([x_os[:2], sliced_latched])
                 
@@ -248,12 +275,18 @@ class DecisionLayer:
                 else:
                     print(f"\033[91m[State A.1] Latched route compromised (min_dist={min_dist_latched:.1f}m)! Recalculating...\033[0m")
             
-            if not cls._mode_a_active and min_dist >= d_safe * 1.5:
-                return np.copy(w_os_base), 0.0, 1.0, "State A.2"
+            # --- TRIGGER NEW EVASION ---
+            tactical_tcpa = 20.0
+            time_to_cpa = float(k_cpa * dt_sim)
+            
+            threat_exists = min_dist < (d_safe * 1.5)
+            inside_tactical_window = time_to_cpa <= tactical_tcpa
+            
+            if not cls._mode_a_active and not (threat_exists and inside_tactical_window):
+                active_track = cls._get_active_nominal_track(nom, x_os[:2])
+                return active_track, 0.0, 1.0, "State A.2"
 
             t_start_a1 = time.perf_counter()
-            
-            tactical_tcpa = 20.0
             k_offset = int(tactical_tcpa / dt_sim)
             
             k_w1 = max(0, k_cpa - k_offset)
@@ -397,6 +430,8 @@ class DecisionLayer:
                         p_ca = 0.0
                         psi_ca = 0.0
 
+            # Reactive Mode uses base heading changes against the full route structure
             return np.copy(w_os), float(psi_ca), float(p_ca), "State B.1"
 
-        return np.copy(w_os), 0.0, 1.0, "State B.2"
+        active_track = cls._get_active_nominal_track(nom, x_os[:2])
+        return active_track, 0.0, 1.0, "State B.2"
