@@ -391,26 +391,26 @@ class OSTransceiverNode(Node):
         if self.cached["state"] != prev_state:
             self.get_logger().info(f"[OS] Transitioned to {self.cached['state']}")
 
-            if self.cached["state"] == "B.2":
-                os_xy = self.internal_state[:2]
+            # if self.cached["state"] == "B.2":
+            #     os_xy = self.internal_state[:2]
 
-                # Identify all mission waypoints still ahead along the track (North coordinate > OS x)
-                forward_indices = [
-                    i for i, wp in enumerate(self.w_mission_os)
-                    if wp[0] > (os_xy[0] - 0.5)
-                ]
+            #     # Identify all mission waypoints still ahead along the track (North coordinate > OS x)
+            #     forward_indices = [
+            #         i for i, wp in enumerate(self.w_mission_os)
+            #         if wp[0] > (os_xy[0] - 0.5)
+            #     ]
 
-                if forward_indices:
-                    target_idx = forward_indices[0]
-                else:
-                    target_idx = len(self.w_mission_os) - 1
+            #     if forward_indices:
+            #         target_idx = forward_indices[0]
+            #     else:
+            #         target_idx = len(self.w_mission_os) - 1
 
-                # Advance cached active route to skip waypoints already behind the ship
-                self.cached["w_active"] = self.w_mission_os[target_idx:]
-                self.get_logger().info(
-                    f"\033[96m[OS] Route Recovery: Targeting forward WP index {target_idx} "
-                    f"-> {self.w_mission_os[target_idx, :2]}\033[0m"
-                )
+            #     # Advance cached active route to skip waypoints already behind the ship
+            #     self.cached["w_active"] = self.w_mission_os[target_idx:]
+            #     self.get_logger().info(
+            #         f"\033[96m[OS] Route Recovery: Targeting forward WP index {target_idx} "
+            #         f"-> {self.w_mission_os[target_idx, :2]}\033[0m"
+            #     )
 
         # 3. Range calculation & Telemetry History Logging
         if self.x_ts_est is not None and abs(self.x_ts_est[0]) < 900.0:

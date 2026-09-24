@@ -174,13 +174,10 @@ class DecisionLayer:
         if not cls._mode_a_active and not cls._mode_b_active:
             cls._w_nominal = np.copy(w_os)
 
-        # Bypass broken own_ship_node.py logic by safely slicing here and returning STAND_ON
         if x_ts is None:
             cls._mode_a_active = False
             cls._mode_b_active = False
-            nom = cls._w_nominal if cls._w_nominal is not None else w_os
-            unsailed = cls._slice_path_forward(nom, x_os[:2])
-            return np.vstack([x_os[:2], unsailed]), 0.0, 1.0, "STAND_ON"
+            return np.copy(w_os), 0.0, 1.0, "State B.2"
 
         u_os = float(x_os[3]) if abs(x_os[3]) > 0.05 else float(u_nominal)
         u_ts = float(x_ts[3]) if abs(x_ts[3]) > 0.05 else float(u_nominal)
@@ -189,8 +186,7 @@ class DecisionLayer:
         if u_os < 0.10 or u_ts < 0.10:
             cls._mode_a_active = False
             cls._mode_b_active = False
-            unsailed = cls._slice_path_forward(cls._w_nominal, x_os[:2])
-            return np.vstack([x_os[:2], unsailed]), 0.0, 1.0, "STAND_ON"
+            return np.copy(w_os), 0.0, 1.0, "State B.2"
 
         d_safe = VesselParams.DCPA_safe
         curr_dist = float(np.hypot(x_os[0] - x_ts[0], x_os[1] - x_ts[1]))
@@ -403,5 +399,4 @@ class DecisionLayer:
 
             return np.copy(w_os), float(psi_ca), float(p_ca), "State B.1"
 
-        unsailed = cls._slice_path_forward(cls._w_nominal, x_os[:2])
-        return np.vstack([x_os[:2], unsailed]), 0.0, 1.0, "STAND_ON"
+        return np.copy(w_os), 0.0, 1.0, "State B.2"
