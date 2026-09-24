@@ -6,7 +6,7 @@
 # Example: ./run_batch_interval.sh case05 15.0 3.0
 # ==============================================================================
 
-SCENARIO=("case04")
+SCENARIO=("case05")
 INTENT_RANGE=10.0
 SPEED_FACTOR=5.0
 TAU_FIXED=0.0
