@@ -1,6 +1,0 @@
-source;share/communication_layer/hook/pythonpath.ps1
-source;share/communication_layer/hook/pythonpath.dsv
-source;share/communication_layer/hook/pythonpath.sh
-source;../../build/communication_layer/share/communication_layer/hook/pythonpath_develop.ps1
-source;../../build/communication_layer/share/communication_layer/hook/pythonpath_develop.dsv
-source;../../build/communication_layer/share/communication_layer/hook/pythonpath_develop.sh
