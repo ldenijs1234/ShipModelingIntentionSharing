@@ -610,27 +610,54 @@ class OSTransceiverNode(Node):
         fig2, ax2 = plt.subplots(figsize=(10, 8))
         fig2.canvas.manager.set_window_title("2D Spatial Trajectory Analysis")
 
-        # 1. Canal Banks
-        bank_color = '#8c564b'
+        # 1. Canal Banks (Rendered with filled beige polygons matching plot_headless_run)
+        from matplotlib.patches import Polygon as MplPolygon
+        bank_edge_color = '#8c564b'
+        bank_face_color = '#ebdcb9'
         bank_labeled = False
+
+        polys = []
         if self.canal_polygons is not None:
             raw_poly = self.canal_polygons
-            polys = [raw_poly] if isinstance(raw_poly, Polygon) else (
-                raw_poly.geoms if isinstance(raw_poly, MultiPolygon) else []
-            )
-            for poly in polys:
-                x_pts, y_pts = poly.exterior.xy
-                lbl = "Canal Bank" if not bank_labeled else None
-                ax2.plot(y_pts, x_pts, color=bank_color, linewidth=2.0, label=lbl)
-                bank_labeled = True
+            if hasattr(raw_poly, 'item'):
+                try:
+                    raw_poly = raw_poly.item()
+                except Exception:
+                    pass
 
+            if isinstance(raw_poly, Polygon):
+                polys = [raw_poly]
+            elif isinstance(raw_poly, MultiPolygon) or hasattr(raw_poly, 'geoms'):
+                polys = list(raw_poly.geoms)
+
+        if polys:
+            for poly in polys:
+                x_pts, y_pts = poly.exterior.xy  # x = North, y = East
+                coords = np.column_stack([y_pts, x_pts])  # Plot: [East, North]
+                patch = MplPolygon(
+                    coords,
+                    closed=True,
+                    facecolor=bank_face_color,
+                    edgecolor=bank_edge_color,
+                    linewidth=1.8,
+                    alpha=0.65,
+                    zorder=1,
+                    label="Canal Bank" if not bank_labeled else None
+                )
+                ax2.add_patch(patch)
+                bank_labeled = True
         elif self.canal_bounds is not None:
             y_min = self.canal_bounds.get('y_min', -4.0)
             y_max = self.canal_bounds.get('y_max', 4.0)
             x_min = self.canal_bounds.get('x_min', -10.0)
             x_max = self.canal_bounds.get('x_max', 50.0)
-            ax2.plot([y_min, y_min], [x_min, x_max], color=bank_color, linewidth=2.0, label="Canal Bank")
-            ax2.plot([y_max, y_max], [x_min, x_max], color=bank_color, linewidth=2.0)
+            
+            port_coords = np.array([[-15.0, x_min], [y_min, x_min], [y_min, x_max], [-15.0, x_max]])
+            ax2.add_patch(MplPolygon(port_coords, closed=True, facecolor=bank_face_color,
+                                    edgecolor=bank_edge_color, linewidth=1.8, alpha=0.65, zorder=1, label="Canal Bank"))
+            stbd_coords = np.array([[y_max, x_min], [15.0, x_min], [15.0, x_max], [y_max, x_max]])
+            ax2.add_patch(MplPolygon(stbd_coords, closed=True, facecolor=bank_face_color,
+                                    edgecolor=bank_edge_color, linewidth=1.8, alpha=0.65, zorder=1))
 
         # 2. Planned routes (East = y, North = x)
         if len(nom_wps) > 0:

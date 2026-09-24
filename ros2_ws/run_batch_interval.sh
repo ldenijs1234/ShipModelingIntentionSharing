@@ -6,11 +6,11 @@
 # Example: ./run_batch_interval.sh case05 15.0 3.0
 # ==============================================================================
 
-SCENARIO=("case01" "case04" "case05")
+SCENARIO=("case04")
 INTENT_RANGE=10.0
 SPEED_FACTOR=2.0
 TAU_FIXED=0.0
-INTERVAL_LIST=(1.1 3.0 6.0 11.0 16.0 21.9)
+INTERVAL_LIST=(6.0 8.5 11.0 13.5 16.0 18.5 21.0)
 
 WS_DIR="/mnt/c/Users/lars/Documents/Ship dynamics - Thesis Lars de Nijs/ros2_ws"
 REPO_DIR="/mnt/c/Users/lars/Documents/Ship dynamics - Thesis Lars de Nijs"
