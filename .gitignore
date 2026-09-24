@@ -18,3 +18,4 @@ __pycache__/
 # Output plots and simulation logs
 ros2_ws/results_plots/
 simulation_logs/
+**/install/
