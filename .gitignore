@@ -5,3 +5,16 @@ ros2_ws/install/
 ros2_ws/log/
 **/__pycache__/
 *.pyc
+
+# ROS 2 build directories & logs
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
+**/log/
+**/COLCON_IGNORE
+*.pyc
+__pycache__/
+
+# Output plots and simulation logs
+ros2_ws/results_plots/
+simulation_logs/

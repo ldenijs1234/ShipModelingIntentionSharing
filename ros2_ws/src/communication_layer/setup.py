@@ -20,6 +20,7 @@ setup(
     entry_points={
         'console_scripts': [
             'latency_bridge_node = communication_layer.latency_bridge_node:main',
+            'sim_clock_node = communication_layer.sim_clock_node:main',
         ],
     },
 )

@@ -13,6 +13,7 @@ import rclpy
 from rclpy.node import Node
 import numpy as np
 import matplotlib.pyplot as plt
+from shapely.geometry import Polygon, MultiPolygon
 
 from std_msgs.msg import Float64MultiArray
 from maritime_interfaces.msg import RouteIntent, VesselKinematics
@@ -22,6 +23,7 @@ from gnc_core.imazu_cases.scenario_loader import load_scenario
 from gnc_core.simulation.pipeline import SynchronousPipeline
 from gnc_core.navigation.state_estimation import StateEstimation
 from gnc_core.tests.kpi_evaluator import resolve_effective_interval
+
 
 class TSHorizonSlicer:
     def __init__(self, full_route_xy: np.ndarray, time_scale: float = 5.4772):
@@ -44,24 +46,24 @@ class TSHorizonSlicer:
         # 1. Project current position onto the route to find true continuous path distance (s_now)
         min_dist = float('inf')
         s_now = 0.0
-        
+
         for i in range(len(self.route) - 1):
             p0 = self.route[i]
-            p1 = self.route[i+1]
-            
+            p1 = self.route[i + 1]
+
             seg_vec = p1 - p0
             seg_len_sq = np.dot(seg_vec, seg_vec)
-            
+
             if seg_len_sq < 1e-6:
                 continue
-                
+
             pt_vec = np.array([current_x, current_y]) - p0
             t = np.dot(pt_vec, seg_vec) / seg_len_sq
             t_clamped = np.clip(t, 0.0, 1.0)
-            
+
             proj_pt = p0 + t_clamped * seg_vec
             dist = np.linalg.norm(np.array([current_x, current_y]) - proj_pt)
-            
+
             if dist < min_dist:
                 min_dist = dist
                 s_now = self.s_cumulative[i] + (t_clamped * np.sqrt(seg_len_sq))
@@ -71,7 +73,7 @@ class TSHorizonSlicer:
         s_end = min(s_now + dist_horizon, self.s_cumulative[-1])
 
         intent_wps = []
-        
+
         # 3. The intent MUST start exactly at the vessel's current coordinate
         intent_wps.append((float(current_x), float(current_y)))
 
@@ -102,7 +104,8 @@ class TSHorizonSlicer:
             intent_wps.append((float(x_end), float(y_end)))
 
         return intent_wps
-    
+
+
 class OSTransceiverNode(Node):
     def __init__(self):
         super().__init__('own_ship_node')
@@ -122,7 +125,6 @@ class OSTransceiverNode(Node):
         self.sim_interval = float(self.get_parameter('interval').value)
 
         scenario_name = self.get_parameter('scenario').value
-        self.speed_factor = max(float(self.get_parameter('speed_factor').value), 0.1)
         self.auto_close = bool(self.get_parameter('auto_close').value)
         self.min_intent_range = float(self.get_parameter('min_intent_range').value)
 
@@ -134,6 +136,7 @@ class OSTransceiverNode(Node):
         self.w_mission_os = config['os_mission_wps'].copy()
         self.w_mission_ts_nominal = config['ts_mission_wps'].copy()
         self.canal_polygons = config.get('canal_polygons', None)
+        self.canal_bounds = config.get('canal_bounds', None)
 
         # Internal state format [x, y, psi, r, b, u]
         raw_state = config['os_initial_state']
@@ -182,11 +185,12 @@ class OSTransceiverNode(Node):
             self.get_logger().warn(
                 f"\033[93m[OS] Configured interval ({raw_interval:.1f}s) clamped "
                 f"to ITU-compliant interval: {self.sim_interval:.1f}s\033[0m"
-            )        
+            )
 
         self.w_ts_delayed: Optional[np.ndarray] = None
         self.t_intent_shared: Optional[float] = None
         self.sim_finished = False
+        self.in_intent_range = False  # Track comms connectivity
 
         # --- Intent Timing Diagnostics ---
         self.t_first_intent_rx: Optional[float] = None
@@ -229,15 +233,16 @@ class OSTransceiverNode(Node):
         self.ts_state_sub = self.create_subscription(
             VesselKinematics, '/ts/state_vector', self.ts_state_callback, 10
         )
-        
-        # Dynamic subscription for VHF routing intent
-        self.ts_route_sub = None 
 
-        dt_timer = self.dt / self.speed_factor
-        self.timer = self.create_timer(dt_timer, self.step_gnc_pipeline)
+        # Static subscription for VHF routing intent (Prevents DDS startup discovery jitter)
+        self.ts_route_sub = self.create_subscription(
+            RouteIntent, '/ts/route_delayed', self.ts_route_callback, 10
+        )
+
+        self.timer = self.create_timer(self.dt, self.step_gnc_pipeline)
 
         self.get_logger().info(
-            f"OS Transceiver initialized for [{scenario_name}] at {self.speed_factor}x speed."
+            f"OS Transceiver initialized for [{scenario_name}] with sim_time."
         )
 
     def ts_state_callback(self, msg: VesselKinematics):
@@ -249,8 +254,12 @@ class OSTransceiverNode(Node):
         self.x_ts_est = fresh_state.copy()
 
     def ts_route_callback(self, msg: RouteIntent):
+        # Ignore intent broadcast packets when outside communication range
+        if not self.in_intent_range:
+            return
+
         self.w_ts_delayed = np.array([[pt.x, pt.y] for pt in msg.route], dtype=np.float64)
-        
+
         # First-time reception trigger and t_advance calculation
         if self.t_first_intent_rx is None:
             self.t_first_intent_rx = float(self.sim_time)
@@ -268,7 +277,7 @@ class OSTransceiverNode(Node):
                 v_ts_vec = np.array([u_ts * np.cos(psi_ts), u_ts * np.sin(psi_ts)])
 
                 dp = p_ts - p_os
-                dv = v_ts_vec - v_os_vec  # Fixed: changed v_ts to v_ts_vec
+                dv = v_ts_vec - v_os_vec
                 dv_sq = float(np.dot(dv, dv))
 
                 if dv_sq > 1e-4:
@@ -285,10 +294,7 @@ class OSTransceiverNode(Node):
                 f"t_advance (TCPA margin): {t_adv_str}\033[0m"
             )
 
-        # Forward the intent to the plotter only after receiving it legitimately in range
-        self.ts_perceived_route_pub.publish(msg)
-
-        # Forward the intent to the plotter only after receiving it legitimately in range
+        # Forward the perceived intent to the live plotter
         self.ts_perceived_route_pub.publish(msg)
 
     def step_gnc_pipeline(self):
@@ -305,9 +311,8 @@ class OSTransceiverNode(Node):
         # 1. Kinematic Dead-Reckoning of TS between AIS Broadcasts (20 Hz)
         if self.x_ts_est is not None:
             dist_to_ts = float(np.linalg.norm(self.internal_state[:2] - self.x_ts_est[:2]))
-            
+
             # --- Dynamic Subscription Range R_IS(t) ---
-            # Extract velocity vectors
             u_os = self.internal_state[5]
             psi_os = self.internal_state[2]
             v_os = np.array([u_os * np.cos(psi_os), u_os * np.sin(psi_os)])
@@ -316,40 +321,37 @@ class OSTransceiverNode(Node):
             psi_ts = self.x_ts_est[2]
             v_ts = np.array([u_ts * np.cos(psi_ts), u_ts * np.sin(psi_ts)])
 
-            # Compute relative closing velocity magnitude ||v_OS - v_TS||
             v_rel_norm = float(np.linalg.norm(v_os - v_ts))
-            
-            # T_tactical = 5 minutes full-scale, scaled to Froude simulation time
-            t_tactical_sim = 300.0 / np.sqrt(30.0) 
-            
-            # R_IS(t) = max(R_min, ||v_rel|| * T_tactical)
+            t_tactical_sim = 300.0 / np.sqrt(30.0)  # 5 min full-scale to Froude sim time
             dynamic_r_is = max(self.min_intent_range, v_rel_norm * t_tactical_sim)
 
-            # Use standard dynamic range for CONNECTING
-            if dist_to_ts <= dynamic_r_is:
-                if self.ts_route_sub is None:
+            r_connect = max(float(self.min_intent_range), float(dynamic_r_is))
+            r_disconnect = max(float(self.min_intent_range) * 1.30, float(dynamic_r_is) * 1.30)
+
+            # Determine whether OS is actively maneuvering
+            current_state_str = str(self.cached.get("state", ""))
+            is_maneuvering = ("A.1" in current_state_str or "A.2" in current_state_str)
+            tcpa_cleared = (self.cached.get("tcpa", 999.0) < 0.0)
+
+            if dist_to_ts <= r_connect:
+                if not self.in_intent_range:
+                    self.in_intent_range = True
                     self.get_logger().info(
-                        f"\033[93m[OS] TS entered intent comms range ({dist_to_ts:.1f}m <= {dynamic_r_is:.1f}m). Subscribing to Intent.\033[0m"
+                        f"\033[93m[OS] TS entered intent comms range ({dist_to_ts:.1f}m <= {r_connect:.1f}m). Subscribing to Intent.\033[0m"
                     )
-                    self.ts_route_sub = self.create_subscription(
-                        RouteIntent, '/ts/route_delayed', self.ts_route_callback, 10
-                    )
-                    
-            # Use dynamic range + 20% hysteresis buffer for DISCONNECTING
-            elif dist_to_ts > (dynamic_r_is * 1.20):
-                if self.ts_route_sub is not None:
+
+            elif dist_to_ts > r_disconnect and (not is_maneuvering or tcpa_cleared):
+                if self.in_intent_range:
+                    self.in_intent_range = False
                     self.get_logger().info(
-                        f"\033[91m[OS] TS left intent comms range ({dist_to_ts:.1f}m > {dynamic_r_is*1.20:.1f}m). Dropping Intent.\033[0m"
+                        f"\033[91m[OS] TS left intent comms range ({dist_to_ts:.1f}m > {r_disconnect:.1f}m). Dropping Intent.\033[0m"
                     )
-                    self.destroy_subscription(self.ts_route_sub)
-                    self.ts_route_sub = None
                     self.w_ts_delayed = None
                     self.t_intent_shared = None
 
-                    # Clear TS route from plotter when leaving comms range
                     empty_msg = RouteIntent()
                     self.ts_perceived_route_pub.publish(empty_msg)
-            
+
             psi_ts = self.x_ts_est[2]
             u_ts = self.x_ts_est[3]
             r_ts = self.x_ts_est[5]
@@ -358,8 +360,8 @@ class OSTransceiverNode(Node):
                 ts_goal = self.w_ts_delayed[-1]
             else:
                 ts_goal = self.w_mission_ts_nominal[-1, :2]
-            
-            # Only integrate position forward if TS has not arrived at terminal waypoint
+
+            # Integrate dead-reckoning position forward if TS has not arrived
             if np.linalg.norm(self.x_ts_est[:2] - ts_goal[:2]) > 0.4:
                 psi_ts_next = (psi_ts + r_ts * self.dt + np.pi) % (2.0 * np.pi) - np.pi
                 self.x_ts_est[2] = psi_ts_next
@@ -371,7 +373,6 @@ class OSTransceiverNode(Node):
 
             x_ts_for_gnc = self.x_ts_est
         else:
-            # Safe dummy target outside detection range until first TS packet arrives
             x_ts_for_gnc = np.array([999.0, 999.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float64)
 
         prev_state = self.cached["state"]
@@ -390,27 +391,6 @@ class OSTransceiverNode(Node):
 
         if self.cached["state"] != prev_state:
             self.get_logger().info(f"[OS] Transitioned to {self.cached['state']}")
-
-            # if self.cached["state"] == "B.2":
-            #     os_xy = self.internal_state[:2]
-
-            #     # Identify all mission waypoints still ahead along the track (North coordinate > OS x)
-            #     forward_indices = [
-            #         i for i, wp in enumerate(self.w_mission_os)
-            #         if wp[0] > (os_xy[0] - 0.5)
-            #     ]
-
-            #     if forward_indices:
-            #         target_idx = forward_indices[0]
-            #     else:
-            #         target_idx = len(self.w_mission_os) - 1
-
-            #     # Advance cached active route to skip waypoints already behind the ship
-            #     self.cached["w_active"] = self.w_mission_os[target_idx:]
-            #     self.get_logger().info(
-            #         f"\033[96m[OS] Route Recovery: Targeting forward WP index {target_idx} "
-            #         f"-> {self.w_mission_os[target_idx, :2]}\033[0m"
-            #     )
 
         # 3. Range calculation & Telemetry History Logging
         if self.x_ts_est is not None and abs(self.x_ts_est[0]) < 900.0:
@@ -461,19 +441,13 @@ class OSTransceiverNode(Node):
         leg_len = np.linalg.norm(leg_vec)
         leg_unit = leg_vec / max(leg_len, 1e-3)
 
-        # Distance to final waypoint and forward projection past the line
         dist_to_final = float(np.linalg.norm(self.internal_state[:2] - final_wp))
         dist_past_goal = float(np.dot(self.internal_state[:2] - final_wp, leg_unit))
 
-        # 1. Classical arrival: inside acceptance circle and stopped
         os_reached_and_stopped = (dist_to_final <= 0.6) and (abs(self.internal_state[5]) < 0.05)
-
-        # 2. Overshoot failsafe: vessel has sailed past the terminal waypoint plane
         os_overshot = dist_past_goal > 1.0
-
         os_at_goal = os_reached_and_stopped or os_overshot
 
-        # TS arrival check
         if self.w_ts_delayed is not None and len(self.w_ts_delayed) > 0:
             ts_goal = self.w_ts_delayed[-1]
         else:
@@ -496,9 +470,7 @@ class OSTransceiverNode(Node):
                     self.timer.cancel()
 
                 self.save_run_log()
-
-                if not self.auto_close:
-                    self.plot_encounter_metrics()
+                self.plot_encounter_metrics()
 
                 if self.auto_close:
                     self.get_logger().info("[OS] Auto-close active. Triggering clean shutdown.")
@@ -513,12 +485,11 @@ class OSTransceiverNode(Node):
         os.makedirs(output_dir, exist_ok=True)
 
         scenario_name = self.get_parameter('scenario').value
-        
-        if self.sim_mode == "IS":
-            tag = f"{scenario_name}_IS_tau{self.sim_latency:.1f}_dt{self.sim_interval:.1f}"
-        else:
-            tag = f"{scenario_name}_RA"
-            
+        tag = (
+            f"{scenario_name}_IS_tau{self.sim_latency:.1f}_dt{self.sim_interval:.1f}"
+            if self.sim_mode == "IS"
+            else f"{scenario_name}_RA"
+        )
         filepath = os.path.join(output_dir, f"{tag}.npz")
 
         t_arr = np.array(self.hist_time)
@@ -531,6 +502,14 @@ class OSTransceiverNode(Node):
         t_adv_val = self.t_advance if self.t_advance is not None else np.nan
         t_rx_val = self.t_first_intent_rx if self.t_first_intent_rx is not None else np.nan
 
+        w_active_val = (
+            np.array(self.cached["w_active"])
+            if ("w_active" in self.cached and self.cached["w_active"] is not None)
+            else np.array([])
+        )
+
+        hist_state_arr = np.array(getattr(self, 'hist_state', []))
+
         np.savez(
             filepath,
             t=t_arr,
@@ -540,12 +519,15 @@ class OSTransceiverNode(Node):
             os_u=os_u,
             ts_pos=ts_pos,
             nominal_wps=np.array(self.w_mission_os),
+            evasive_wps=w_active_val,
             w_ts_delayed=np.array(self.w_ts_delayed) if self.w_ts_delayed is not None else np.array([]),
+            hist_state=hist_state_arr,
             scenario=scenario_name,
+            canal_polygons=self.canal_polygons,
+            canal_bounds=self.canal_bounds,
             mode=self.sim_mode,
             latency=self.sim_latency,
             interval=self.sim_interval,
-            # Intent timing metrics
             t_advance=t_adv_val,
             t_first_intent_rx=t_rx_val,
         )
@@ -563,8 +545,31 @@ class OSTransceiverNode(Node):
         tcpa_arr = np.array(self.hist_tcpa)
         r_arr = np.degrees(np.array(self.hist_r))
 
-        fig, axs = plt.subplots(4, 1, figsize=(10, 10), sharex=True)
-        fig.canvas.manager.set_window_title("COLREGs Encounter & Performance Metrics")
+        os_pos = np.array(self.hist_os_pos)
+        ts_pos = np.array(self.hist_ts_pos)
+        nom_wps = np.array(self.w_mission_os)
+        evasive_wps = (
+            np.array(self.cached["w_active"])
+            if ("w_active" in self.cached and self.cached["w_active"] is not None)
+            else np.array([])
+        )
+
+        scenario_name = self.get_parameter('scenario').value
+        tag = (
+            f"{scenario_name}_IS_tau{self.sim_latency:.1f}_dt{self.sim_interval:.1f}"
+            if self.sim_mode == "IS"
+            else f"{scenario_name}_RA"
+        )
+        
+        # Target folder: ros2_ws/results_plots
+        output_dir = os.path.join(str(parent_repo), "ros2_ws", "results_plots")
+        os.makedirs(output_dir, exist_ok=True)
+
+        # ----------------------------------------------------------------------
+        # Figure 1: Encounter & Performance Metrics
+        # ----------------------------------------------------------------------
+        fig1, axs = plt.subplots(4, 1, figsize=(10, 10), sharex=True)
+        fig1.canvas.manager.set_window_title("COLREGs Encounter & Performance Metrics")
 
         # Range
         axs[0].plot(t_arr, range_arr, label="Range (m)", color="#1f77b4", linewidth=1.8)
@@ -594,7 +599,85 @@ class OSTransceiverNode(Node):
         axs[3].grid(True, linestyle="--", alpha=0.5)
         axs[3].legend(loc="upper right")
 
-        plt.tight_layout()
+        fig1.tight_layout()
+        metrics_png = os.path.join(output_dir, f"{tag}_metrics.png")
+        fig1.savefig(metrics_png, dpi=300)
+        plt.close(fig1)
+
+        # ----------------------------------------------------------------------
+        # Figure 2: 2D Spatial Trajectory & Evasion Route
+        # ----------------------------------------------------------------------
+        fig2, ax2 = plt.subplots(figsize=(10, 8))
+        fig2.canvas.manager.set_window_title("2D Spatial Trajectory Analysis")
+
+        # 1. Canal Banks
+        bank_color = '#8c564b'
+        bank_labeled = False
+        if self.canal_polygons is not None:
+            raw_poly = self.canal_polygons
+            polys = [raw_poly] if isinstance(raw_poly, Polygon) else (
+                raw_poly.geoms if isinstance(raw_poly, MultiPolygon) else []
+            )
+            for poly in polys:
+                x_pts, y_pts = poly.exterior.xy
+                lbl = "Canal Bank" if not bank_labeled else None
+                ax2.plot(y_pts, x_pts, color=bank_color, linewidth=2.0, label=lbl)
+                bank_labeled = True
+
+        elif self.canal_bounds is not None:
+            y_min = self.canal_bounds.get('y_min', -4.0)
+            y_max = self.canal_bounds.get('y_max', 4.0)
+            x_min = self.canal_bounds.get('x_min', -10.0)
+            x_max = self.canal_bounds.get('x_max', 50.0)
+            ax2.plot([y_min, y_min], [x_min, x_max], color=bank_color, linewidth=2.0, label="Canal Bank")
+            ax2.plot([y_max, y_max], [x_min, x_max], color=bank_color, linewidth=2.0)
+
+        # 2. Planned routes (East = y, North = x)
+        if len(nom_wps) > 0:
+            ax2.plot(nom_wps[:, 1], nom_wps[:, 0], 'k--', alpha=0.5, label='Original Mission')
+            ax2.scatter(nom_wps[:, 1], nom_wps[:, 0], c='black', s=20, alpha=0.5)
+
+        if evasive_wps.size > 0:
+            ax2.plot(evasive_wps[:, 1], evasive_wps[:, 0], color='tab:blue', linestyle='--',
+                     marker='o', markersize=4, label='Latched Evasive Route')
+
+        # 3. Actual sailed tracks
+        ax2.plot(os_pos[:, 1], os_pos[:, 0], color='tab:blue', linewidth=2.2, label='OS Track')
+        ax2.plot(ts_pos[:, 1], ts_pos[:, 0], color='tab:red', linewidth=2.2, label='TS Track')
+
+        # Start and terminal markers
+        ax2.scatter(os_pos[0, 1], os_pos[0, 0], color='tab:blue', s=60, marker='o', label='OS Start')
+        ax2.scatter(os_pos[-1, 1], os_pos[-1, 0], color='tab:blue', s=80, marker='x', label='OS End')
+        ax2.scatter(ts_pos[0, 1], ts_pos[0, 0], color='tab:red', s=60, marker='o', label='TS Start')
+        ax2.scatter(ts_pos[-1, 1], ts_pos[-1, 0], color='tab:red', s=80, marker='x', label='TS End')
+
+        # Closest Point of Approach marker
+        dists = np.hypot(os_pos[:, 0] - ts_pos[:, 0], os_pos[:, 1] - ts_pos[:, 1])
+        min_idx = int(np.argmin(dists))
+        ax2.scatter(os_pos[min_idx, 1], os_pos[min_idx, 0], color='darkorange', s=90, marker='*', zorder=5)
+        ax2.scatter(ts_pos[min_idx, 1], ts_pos[min_idx, 0], color='darkorange', s=90, marker='*', zorder=5)
+        ax2.plot([os_pos[min_idx, 1], ts_pos[min_idx, 1]],
+                 [os_pos[min_idx, 0], ts_pos[min_idx, 0]],
+                 'k:', linewidth=1.5, label=f'CPA: {dists[min_idx]:.2f} m @ {t_arr[min_idx]:.1f} s')
+
+        title_str = f"Run Trajectory: {scenario_name} ({self.sim_mode})"
+        if self.sim_mode == "IS":
+            title_str += f" | $\\tau$={self.sim_latency:.1f}s, $\\Delta T$={self.sim_interval:.1f}s"
+        ax2.set_title(title_str, fontsize=12, fontweight='bold', pad=10)
+
+        ax2.set_xlabel("East (y) [m]")
+        ax2.set_ylabel("North (x) [m]")
+        ax2.grid(True, linestyle="--", alpha=0.5)
+        ax2.axis("equal")
+        ax2.legend(loc="lower left", framealpha=0.9)
+
+        fig2.tight_layout()
+        spatial_png = os.path.join(output_dir, f"{tag}_trajectory.png")
+        fig2.savefig(spatial_png, dpi=300)
+        plt.close(fig2)
+
+        self.get_logger().info(f"[Plotter] Saved figures: {metrics_png} and {spatial_png}")
+
         if not self.auto_close:
             plt.show()
 

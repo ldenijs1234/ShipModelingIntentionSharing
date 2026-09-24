@@ -21,6 +21,13 @@ class LatencyBridgeNode(Node):
         self.get_logger().info('Latency bridge initialized.')
 
     def route_callback(self, msg: RouteIntent):
+        latency = self.get_parameter('latency').get_parameter_value().double_value
+        
+        # Zero-latency fast path: avoid queue discretization delay
+        if latency <= 1e-4:
+            self.pub.publish(msg)
+            return
+
         current_time = self.get_clock().now().nanoseconds / 1e9
         self.queue.append((current_time, msg))
 
@@ -36,9 +43,14 @@ class LatencyBridgeNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = LatencyBridgeNode()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

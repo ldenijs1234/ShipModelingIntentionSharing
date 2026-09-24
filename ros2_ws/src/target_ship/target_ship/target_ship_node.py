@@ -22,6 +22,7 @@ from gnc_core.control.autopilot import Autopilot
 from gnc_core.models.vessel_dynamics import VesselDynamics
 from gnc_core.tests.kpi_evaluator import resolve_effective_interval
 
+
 class TSHorizonSlicer:
     def __init__(self, full_route_xy: np.ndarray, time_scale: float = 5.4772):
         self.route = full_route_xy
@@ -43,24 +44,24 @@ class TSHorizonSlicer:
         # 1. Project current position onto the route to find true continuous path distance (s_now)
         min_dist = float('inf')
         s_now = 0.0
-        
+
         for i in range(len(self.route) - 1):
             p0 = self.route[i]
-            p1 = self.route[i+1]
-            
+            p1 = self.route[i + 1]
+
             seg_vec = p1 - p0
             seg_len_sq = np.dot(seg_vec, seg_vec)
-            
+
             if seg_len_sq < 1e-6:
                 continue
-                
+
             pt_vec = np.array([current_x, current_y]) - p0
             t = np.dot(pt_vec, seg_vec) / seg_len_sq
             t_clamped = np.clip(t, 0.0, 1.0)
-            
+
             proj_pt = p0 + t_clamped * seg_vec
             dist = np.linalg.norm(np.array([current_x, current_y]) - proj_pt)
-            
+
             if dist < min_dist:
                 min_dist = dist
                 s_now = self.s_cumulative[i] + (t_clamped * np.sqrt(seg_len_sq))
@@ -70,7 +71,7 @@ class TSHorizonSlicer:
         s_end = min(s_now + dist_horizon, self.s_cumulative[-1])
 
         intent_wps = []
-        
+
         # 3. The intent MUST start exactly at the vessel's current coordinate
         intent_wps.append((float(current_x), float(current_y)))
 
@@ -101,7 +102,8 @@ class TSHorizonSlicer:
             intent_wps.append((float(x_end), float(y_end)))
 
         return intent_wps
-    
+
+
 class TSSimulatorNode(Node):
     def __init__(self):
         super().__init__('ts_simulator_node')
@@ -116,7 +118,6 @@ class TSSimulatorNode(Node):
 
         self.share_intent = bool(self.get_parameter('share_intent').value)
         raw_route_interval = float(self.get_parameter('route_interval').value)
-        self.speed_factor = max(float(self.get_parameter('speed_factor').value), 0.1)
 
         self.dt = 0.05  # 20 Hz simulation integration step
         self.u_nominal = float(config['ts_nominal_speed'])
@@ -136,7 +137,7 @@ class TSSimulatorNode(Node):
 
         # Initialize the dynamic horizon slicer
         self.ts_slicer = TSHorizonSlicer(self.w_mission_ts)
-        
+
         # Determine realistic initial waypoint count for the 5-minute window
         initial_intent = self.ts_slicer.extract_5min_intent(
             current_x=self.internal_state[0],
@@ -166,6 +167,7 @@ class TSSimulatorNode(Node):
         # ITU-R M.1371 Table 1 dynamic AIS interval tracking
         self.sim_time = 0.0
         self.last_ais_tx_time = 0.0
+        self.last_route_tx_time = 0.0
         self.heading_history = deque(maxlen=int(30.0 / self.dt))
 
         # ROS Publishers and Subscribers
@@ -176,13 +178,10 @@ class TSSimulatorNode(Node):
             Float64MultiArray, '/os/state_vector', self.os_state_callback, 10
         )
 
-        dt_sim_timer = self.dt / self.speed_factor
-        dt_route_timer = self.route_interval / self.speed_factor
-
-        self.sim_timer = self.create_timer(dt_sim_timer, self.step_gnc_pipeline)
-        self.route_timer = self.create_timer(dt_route_timer, self.publish_route)
+        self.sim_timer = self.create_timer(self.dt, self.step_gnc_pipeline)
 
         self.publish_current_state()
+        self.publish_route()
 
         mode = (
             f"WITH intent (Effective Interval = {self.route_interval:.1f}s, ITU min = {self.min_itu_interval:.1f}s)"
@@ -190,7 +189,7 @@ class TSSimulatorNode(Node):
             else "WITHOUT intent"
         )
         self.get_logger().info(
-            f"TS Simulator running for [{scenario_name}] ({mode}) at {self.speed_factor}x speed."
+            f"TS Simulator running for [{scenario_name}] ({mode}) with sim_time."
         )
 
     def os_state_callback(self, msg: Float64MultiArray):
@@ -327,6 +326,12 @@ class TSSimulatorNode(Node):
         if (self.sim_time - self.last_ais_tx_time) >= req_interval:
             self.publish_current_state()
             self.last_ais_tx_time = self.sim_time
+
+        # 3. Discrete Route Intent broadcast tied to sim_time
+        if self.share_intent and not self.sim_finished:
+            if (self.sim_time - self.last_route_tx_time) >= (self.route_interval - 1e-5):
+                self.publish_route()
+                self.last_route_tx_time = self.sim_time
 
     def publish_route(self):
         if not self.share_intent or self.sim_finished:
