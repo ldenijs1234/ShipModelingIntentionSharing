@@ -30,28 +30,28 @@ CASE06_CONFIG = {
 
     "canal_polygons": poly_canal_full,
     "canal_bounds": {
-        "y_min": -3.0,
-        "y_max": 3.0,
+        "y_min": -6.0,
+        "y_max": 6.0,
         "x_min": -40.0,
         "x_max": 70.0
     },
 
     # Own Ship (Faster vessel: 0.52 m/s, starts behind at X = -35.0 m)
-    "os_initial_state": np.array([-35.0, -0.8, 0.0, 0.52, 0.0, 0.0], dtype=np.float64),
+    "os_initial_state": np.array([-35.0, 1.8, 0.0, 0.52, 0.0, 0.0], dtype=np.float64),
     "os_nominal_speed": 0.52,
     "os_mission_wps": np.array([
-        [-35.0, -0.8],
-        [ 65.0, -0.8]
+        [-35.0, 1.8],
+        [ 65.0, 1.8]
     ], dtype=np.float64),
 
     # Target Ship (Slower vessel: 0.28 m/s, starts ahead at X = -10.0 m)
     # Initial separation = 25.0 m. Relative closing speed = 0.24 m/s.
     # R_IS is clamped to R_min (10.0 m) -> Starts safely out of range (25.0 m > 10.0 m)
-    "ts_initial_state": np.array([-10.0, -0.8, 0.0, 0.28, 0.0, 0.0], dtype=np.float64),
+    "ts_initial_state": np.array([-10.0, 1.8, 0.0, 0.28, 0.0, 0.0], dtype=np.float64),
     "ts_nominal_speed": 0.28,
     "ts_mission_wps": np.array([
-        [-10.0, -0.8],
-        [ 65.0, -0.8]
+        [-10.0, 1.8],
+        [ 65.0, 1.8]
     ], dtype=np.float64),
     "t_sim": 220.0
 }

@@ -11,8 +11,8 @@ import shapely.ops as so
 
 os_wps = np.array(
     [
-        [ 25.0, -35.0],
-        [ 15.0, -15.0],
+        [ 27.0, -37.0],
+        [ 10.0, -18.0],
         [  5.0,   5.0],   # Crossing area
         [  8.0,  20.0],   # Trimmed exit
     ],
@@ -21,9 +21,9 @@ os_wps = np.array(
 
 ts_wps = np.array(
     [
-        [ 30.0,  30.0],
+        [ 22.0,  28.0],
         [ 15.0,  15.0],
-        [  5.0,  -2.0],   # Turning into south exit
+        [  11.0,  1.0],   # Turning into south exit
         [-12.0,  -5.0],   # Trimmed exit inside channel opening
     ],
     dtype=np.float64,
@@ -74,9 +74,9 @@ CASE04_CONFIG = {
     },
 
     "os_initial_state": np.array(
-        [os_wps[0, 0], os_wps[0, 1], psi_os_init, 0.45, 0.0, 0.0], dtype=np.float64
+        [os_wps[0, 0], os_wps[0, 1], psi_os_init, 0.5, 0.0, 0.0], dtype=np.float64
     ),
-    "os_nominal_speed": 0.45,
+    "os_nominal_speed": 0.5,
     "os_mission_wps": os_wps,
 
     "ts_initial_state": np.array(

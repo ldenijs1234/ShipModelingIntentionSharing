@@ -14,6 +14,7 @@ class DecisionLayer:
     _w_evasive_latched = None
     _p_evasive_latched = 1.0
     _w_nominal = None
+    _latched_scenario = None
 
     k_chi_stb = 5.0
     k_chi_port = 5.2
@@ -101,7 +102,10 @@ class DecisionLayer:
             elif min_static_dist <= VesselParams.d_safe_static:
                 j_grounding = cls.k_grounding * ((VesselParams.d_safe_static / max(min_static_dist, 0.05)) ** 2.5)
 
-        k_w = cls.k_chi_stb if chi > 0.0 else cls.k_chi_port
+        if scenario in ["Overtaking"]:
+            k_w = cls.k_chi_stb
+        else:
+            k_w = cls.k_chi_stb if chi <= 0.0 else cls.k_chi_port
         j_control = k_w * (chi**2)
         j_speed = cls.k_p * (1.0 - p_cand)
 
@@ -189,6 +193,7 @@ class DecisionLayer:
             cls._mode_a_active = False
             cls._mode_b_active = False
             cls._w_evasive_latched = None
+            cls._latched_scenario = None
             active_track = cls._get_active_nominal_track(nom, x_os[:2])
             return active_track, 0.0, 1.0, "State B.2"
 
@@ -199,6 +204,7 @@ class DecisionLayer:
             cls._mode_a_active = False
             cls._mode_b_active = False
             cls._w_evasive_latched = None
+            cls._latched_scenario = None
             active_track = cls._get_active_nominal_track(nom, x_os[:2])
             return active_track, 0.0, 1.0, "State B.2"
 
@@ -208,7 +214,17 @@ class DecisionLayer:
         scenario = "Unknown"
         if x_ts is not None:
             beta_init = RiskCalculator.calculate_relative_bearing(x_os, x_ts)
-            scenario = RiskCalculator.classify_colreg_scenario(beta_init)
+            beta_deg = np.degrees(beta_init) % 360.0
+            raw_scenario = RiskCalculator.classify_colreg_scenario(
+                beta_deg, psi_os=float(x_os[2]), psi_ts=float(x_ts[2])
+            )
+            
+            # If Mode B is currently active, use the latched initial scenario
+            # (Adheres to COLREGs Rule 13(d): Once overtaking, always overtaking until clear)
+            if cls._mode_b_active and cls._latched_scenario is not None:
+                scenario = cls._latched_scenario
+            else:
+                scenario = raw_scenario
 
         # ----------------------------------------------------------------------
         # Mode A: Shared Intent (Predictive Re-evaluation & Deferred Execution)
@@ -234,23 +250,32 @@ class DecisionLayer:
             dx = x_ts[0] - x_os[0]
             dy = x_ts[1] - x_os[1]
             longitudinal_rel = dx * np.cos(x_os[2]) + dy * np.sin(x_os[2])
-            
-            is_astern = longitudinal_rel < -0.5
-            passed_cpa = (tcpa < -0.5) or (is_astern and curr_dist < 4.0)
-            separating = curr_dist > (d_safe * 1.5) and (tcpa < 0.0 or tcpa > 100.0)
 
-            if passed_cpa and separating:
-                cls._mode_a_active = False
-                cls._w_evasive_latched = None
-                active_track = cls._get_active_nominal_track(nom, x_os[:2])
-                return active_track, 0.0, 1.0, "State A.2"
+            if scenario is "Overtaking":
+                has_passed = longitudinal_rel < -(5.0 * VesselParams.L)
+                if (tcpa < -10.0) or (has_passed and curr_dist > 4.0):
+                    cls._mode_a_active = False
+                    cls._w_evasive_latched = None
+                    active_track = cls._get_active_nominal_track(nom, x_os[:2])
+                    return active_track, 0.0, 1.0, "State A.2"
+                
+            else:
+                is_astern = longitudinal_rel < -0.5
+                passed_cpa = (tcpa < -0.5) or (is_astern and curr_dist < 4.0)
+                separating = curr_dist > (d_safe * 1.5) and (tcpa < 0.0 or tcpa > 100.0)
 
-            threat_cleared = (min_dist_nom >= d_safe * 2.0 and curr_dist > d_safe * 2.0)
-            if threat_cleared:
-                cls._mode_a_active = False
-                cls._w_evasive_latched = None
-                active_track = cls._get_active_nominal_track(nom, x_os[:2])
-                return active_track, 0.0, 1.0, "State A.2"
+                if passed_cpa and separating:
+                    cls._mode_a_active = False
+                    cls._w_evasive_latched = None
+                    active_track = cls._get_active_nominal_track(nom, x_os[:2])
+                    return active_track, 0.0, 1.0, "State A.2"
+
+                threat_cleared = (min_dist_nom >= d_safe * 2.0 and curr_dist > d_safe * 2.0)
+                if threat_cleared:
+                    cls._mode_a_active = False
+                    cls._w_evasive_latched = None
+                    active_track = cls._get_active_nominal_track(nom, x_os[:2])
+                    return active_track, 0.0, 1.0, "State A.2"
 
             # 4. Prospective Safety Verification of the Latched Plan
             if cls._mode_a_active and cls._w_evasive_latched is not None:
@@ -401,32 +426,63 @@ class DecisionLayer:
         close_quarters = (curr_dist < d_safe * 1.5) and (dcpa < threshold_cpa) and (tcpa > -3.0)
         risk_active = cpa_risk or domain_breached or close_quarters
 
+        # Relative longitudinal distance along OS heading (+ = TS is ahead of OS, - = TS is behind OS)
+        os_heading = x_os[2]
+        dx_rel = (x_ts[0] - x_os[0]) * np.cos(os_heading) + (x_ts[1] - x_os[1]) * np.sin(os_heading)
+        dy_rel = abs(x_os[1] - x_ts[1])
+
+        # --- Hysteresis Latching Logic for Mode B ---
         if cls._mode_b_active:
-            has_passed = (tcpa < 0.0) and (curr_dist > (d_safe * 1.2))
-            if has_passed:
-                cls._mode_b_active = False
+            # Check exit conditions using the latched scenario
+            if scenario in "Overtaking":
+                # Exit ONLY when OS has physically pulled ahead of TS
+                if dx_rel < (-VesselParams.L * 1.5):
+                    cls._mode_b_active = False
+                    cls._latched_scenario = None
+            else:
+                passed_cpa = (tcpa <= -2.0) and (curr_dist > (d_safe * 1.3))
+                if passed_cpa:
+                    cls._mode_b_active = False
+                    cls._latched_scenario = None
         else:
             if risk_active:
                 cls._mode_b_active = True
+                cls._latched_scenario = scenario
 
         if cls._mode_b_active:
             urgency = np.clip((d_safe - dcpa) / max(d_safe, 1e-3), 0.0, 1.0)
             psi_headon = np.radians(30.0 + (60.0 - 30.0) * urgency)
+            psi_crossing = np.radians(20.0 + (45.0 - 20.0) * urgency)
 
             if scenario == "Head-On":
                 psi_ca = psi_headon 
                 p_ca = 0.5 if urgency > 0.6 else 1.0
-            elif scenario in ["Crossing_A", "Crossing_B"]:
-                psi_ca = np.radians(45.0)
-                p_ca = 0.5 if curr_dist < (d_safe * 1.5) else 1.0
+            elif scenario == "Crossing_A":  # Give-Way (TS on Starboard)
+                # Alter course substantially to starboard to pass astern of TS
+                psi_ca = psi_crossing
+                p_ca = 0.5 if urgency > 0.5 else 1.0
+
+            elif scenario == "Crossing_B":  # Stand-On (TS on Port)
+                # Under Rule 17, Stand-On holds course/speed unless TS fails to act.
+                # If Mode B triggers for Stand-On, it is an in-extremis maneuver:
+                # Steer starboard, but avoid turning port toward TS.
+                psi_ca = psi_crossing
+                p_ca = 0.5 if urgency > 0.7 else 1.0
             elif scenario == "Overtaking":
-                psi_ca = np.radians(30.0)
                 p_ca = 1.0
+                
+                # Check lateral lane clearance between OS and TS
+                # If OS is still in TS's lane, step out to port (-25 deg)
+                if dy_rel < (VesselParams.DCPA_safe * 1.2):
+                    psi_ca = np.radians(-25.0)
+                else:
+                    # Once in the port lane, STRAIGHTEN OUT to run parallel and pass TS
+                    psi_ca = 0.0
             else:
                 psi_ca = np.radians(30.0)
                 p_ca = 1.0
 
-            if curr_dist < d_safe * 0.8:
+            if scenario != "Overtaking" and curr_dist < d_safe * 0.8:
                 p_ca = 0.0
 
             if canal_polygons is not None:
@@ -453,6 +509,8 @@ class DecisionLayer:
                         p_ca = 0.0
                         psi_ca = 0.0
 
+            print(f"[DEBUG MODE B] Scenario: {scenario}, psi_ca: {np.degrees(psi_ca):.1f}, "
+                  f"mode_b: {cls._mode_b_active}")
             return np.copy(w_os), float(psi_ca), float(p_ca), "State B.1"
 
         active_track = cls._get_active_nominal_track(nom, x_os[:2])

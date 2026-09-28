@@ -11,15 +11,15 @@ import shapely.ops as so
 poly_port = Polygon([
     (-35.0, -18.0),
     (35.0, -18.0),
-    (35.0, -4.0),
-    (-35.0, -4.0)
+    (35.0, -6.0),
+    (-35.0, -6.0)
 ])
 
 poly_starboard = Polygon([
     (-35.0, 15.0),
     (35.0, 15.0),
-    (35.0, 4.0),
-    (-35.0, 4.0)
+    (35.0, 6.0),
+    (-35.0, 6.0)
 ])
 
 poly_canal_full = so.unary_union([poly_port, poly_starboard])
@@ -52,7 +52,7 @@ CASE02_CONFIG = {
     "ts_nominal_speed": 0.45,
     "ts_mission_wps": np.array([
         [ 30.0, -1.0],
-        [  6.0, -1.0],
+        [  4.0, -1.0],
         [ -8.0,  5.0]
     ], dtype=np.float64),
     "t_sim": 95.0

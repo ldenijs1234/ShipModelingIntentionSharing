@@ -58,8 +58,8 @@ CASE03_CONFIG = {
     "ts_nominal_speed": 0.45,
     "ts_mission_wps": np.array([
         [ 0.0, 25.0],
-        [ 0.0,  0.0],   # Crosses right through the centerline conflict point
-        [12.0,  2.5]    # Turns North along the East fairway lane
+        [ 0.0,  1.0],   # Crosses right through the centerline conflict point
+        [12.0,  1.0]    # Turns North along the East fairway lane
     ], dtype=np.float64),
     "t_sim": 85.0
 }

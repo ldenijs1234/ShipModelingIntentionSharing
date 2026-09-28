@@ -11,15 +11,30 @@ class RiskCalculator:
         return float(np.degrees(phi - x_os[2]) % 360.0)
 
     @staticmethod
-    def classify_colreg_scenario(beta_deg: float) -> str:
+    def classify_colreg_scenario(beta_deg: float, psi_os: float = 0.0, psi_ts: float = 0.0) -> str:
         """Classifies encounter based on relative bearing boundaries (Table 2.1)."""
-        if beta_deg <= 22.5 or beta_deg >= 337.5:
+        # Normalize relative heading difference to [-180, 180] deg
+        diff_deg = np.degrees((psi_ts - psi_os + np.pi) % (2.0 * np.pi) - np.pi)
+
+        # Ahead sector: beta in [-22.5, 22.5] or [337.5, 360] / [0, 22.5]
+        is_ahead = (beta_deg <= 22.5 or beta_deg >= 337.5)
+
+        if is_ahead:
+            # If both vessels head in similar directions (|diff| < 67.5 deg), OS is overtaking TS
+            if abs(diff_deg) < 67.5:
+                return "Overtaking"
+            # If vessels head opposite (|diff| > 112.5 deg), it is a reciprocal Head-On
             return "Head-On"
-        elif 112.5 < beta_deg < 247.5:
-            return "Overtaking"
-        elif 22.5 < beta_deg <= 112.5:
-            return "Crossing_A"
-        return "Crossing_B"
+
+        # OS being overtaken from astern
+        if 112.5 < beta_deg < 247.5:
+            return "Overtaken"
+
+        # Crossing sectors
+        if 22.5 < beta_deg <= 112.5:
+            return "Crossing_A"  # TS on Starboard (OS Give-Way)
+
+        return "Crossing_B"       # TS on Port (OS Stand-On)
 
     @staticmethod
     def calculate_cpa(x_os: np.ndarray, x_ts: np.ndarray, u_nominal: float) -> Tuple[float, float]:
