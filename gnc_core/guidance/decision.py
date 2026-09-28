@@ -251,7 +251,7 @@ class DecisionLayer:
             dy = x_ts[1] - x_os[1]
             longitudinal_rel = dx * np.cos(x_os[2]) + dy * np.sin(x_os[2])
 
-            if scenario is "Overtaking":
+            if scenario in ["Overtaking"]:
                 has_passed = longitudinal_rel < -(5.0 * VesselParams.L)
                 if (tcpa < -10.0) or (has_passed and curr_dist > 4.0):
                     cls._mode_a_active = False
@@ -365,18 +365,36 @@ class DecisionLayer:
                     if abs(chi) < 1e-3 and p_cand > 0.99:
                         cand_wps = np.copy(w_os_base)
                     else:
-                        cos_chi = np.cos(chi)
-                        sin_chi = np.sin(chi)
-                        u_evade = np.array([
-                            u_nom[0] * cos_chi - u_nom[1] * sin_chi,
-                            u_nom[0] * sin_chi + u_nom[1] * cos_chi
-                        ])
-                        W_2 = W_1 + u_evade * D
-
-                        if len(pre_w1_wps) > 0:
-                            full_route = np.vstack([pre_w1_wps, W_1, W_2, W_3, remaining_wps])
+                        if scenario in ["Overtaking"]:
+                            # Overtaking: Form a parallel passing lane to port (Y = -0.8m)
+                            # to avoid cutting a shallow diagonal toward TS.
+                            port_lane_y = -0.8
+                            
+                            # Lateral step-out begins ahead of OS current position
+                            x_stepout = x_os[0] + max(u_os * 10.0, 5.0)
+                            wp_stepout = np.array([x_stepout, port_lane_y])
+                            
+                            # Passing waypoint aligned with CPA / TS position
+                            x_pass = max(os_traj_nom[k_cpa, 0], x_ts[0] + 3.0 * VesselParams.L)
+                            wp_pass = np.array([x_pass, port_lane_y])
+                            
+                            # Rejoin waypoint safely downstream
+                            wp_rejoin = np.array([x_pass + 10.0, w_os_base[-1, 1]])
+                            
+                            full_route = np.vstack([x_os[:2], wp_stepout, wp_pass, wp_rejoin, w_os_base[-1:, :2]])
                         else:
-                            full_route = np.vstack([W_1, W_2, W_3, remaining_wps])
+                            cos_chi = np.cos(chi)
+                            sin_chi = np.sin(chi)
+                            u_evade = np.array([
+                                u_nom[0] * cos_chi - u_nom[1] * sin_chi,
+                                u_nom[0] * sin_chi + u_nom[1] * cos_chi
+                            ])
+                            W_2 = W_1 + u_evade * D
+
+                            if len(pre_w1_wps) > 0:
+                                full_route = np.vstack([pre_w1_wps, W_1, W_2, W_3, remaining_wps])
+                            else:
+                                full_route = np.vstack([W_1, W_2, W_3, remaining_wps])
 
                         sliced_route = cls._slice_path_forward(full_route, x_os[:2])
                         cand_wps = np.vstack([x_os[:2], sliced_route])
