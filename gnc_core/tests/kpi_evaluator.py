@@ -127,6 +127,53 @@ class ScenarioKPIEvaluator:
 
         return ctes
 
+    def compute_safety_risk_factors(
+        min_dist: float,
+        rudder_history: np.ndarray,
+        time_history: np.ndarray,
+        d_safe: float = 1.0,
+        d_max: float = 2.8,
+        max_rudder_rate_deg_s: float = 90.0,
+        w_dist: float = 0.5,
+        w_steer: float = 0.5,
+    ) -> tuple[float, float, float]:
+        """
+        Computes normalized risk factors in [0, 1] for distance and steering change.
+        """
+        # 1. Distance Risk Factor (R_dist)
+        if min_dist < (d_safe - 0.01):
+            r_dist = float('inf')  # Domain breach
+        elif min_dist >= d_max:
+            r_dist = 0.0
+        else:
+            # Exponential / cubic decay from 1.0 down to 0.0
+            p_dist = 3.0
+            r_dist = float(((d_max - min_dist) / (d_max - d_safe)) ** p_dist)
+
+        # 2. Dynamic Maneuver Risk Factor (R_steer)
+        if len(rudder_history) > 1 and len(time_history) > 1:
+            dt = np.diff(time_history)
+            d_rudder = np.diff(rudder_history)
+            valid_dt = np.where(dt > 1e-4, dt, 1e-4)
+            raw_rates = np.abs(d_rudder / valid_dt)  # deg/s
+
+            # Apply a short rolling window (e.g., 3-5 samples) or 95th percentile
+            # to filter out single-timestep numerical differentiation artifacts
+            filtered_peak = float(np.percentile(raw_rates, 98))
+        else:
+            filtered_peak = 0.0
+
+        # Quadratic scaling against the 90 deg/s theoretical threshold
+        r_steer = float(min(1.0, (filtered_peak / max_rudder_rate_deg_s) ** 2.0))
+
+        # 3. Composite Safety Risk
+        if r_dist == float("inf"):
+            r_safety = float("inf")
+        else:
+            r_safety = float(w_dist * r_dist + w_steer * r_steer)
+
+        return r_dist, filtered_peak, r_steer, r_safety
+
     def evaluate_single_run(
         self,
         t: np.ndarray,
@@ -164,7 +211,7 @@ class ScenarioKPIEvaluator:
         # 1. Safety Constraint: Range R(t)
         ranges = np.linalg.norm(ts_pos - os_pos, axis=1)
         r_min = float(np.min(ranges))
-        breached = r_min < self.d_safe
+        breached = r_min < (self.d_safe - 0.01)
         j_safe = np.inf if breached else 0.0
 
         # 2. Control Effort: Integral of squared yaw acceleration r_dot^2

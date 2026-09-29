@@ -84,7 +84,7 @@ class DecisionLayer:
         min_idx = int(np.argmin(dists))
         min_dist = float(dists[min_idx])
 
-        if min_dist <= (d_safe * 2.5):
+        if min_dist <= (d_safe):
             j_safety = cls.k_safety * ((d_safe / max(min_dist, 0.05)) ** 4.0)
         else:
             j_safety = 0.0
@@ -307,7 +307,7 @@ class DecisionLayer:
                     cls._w_evasive_latched = None  # Force full re-planning immediately
 
             # 5. Planning Trigger Check
-            threat_exists = min_dist_nom < (d_safe * 1.5)
+            threat_exists = min_dist_nom < d_safe
             if not cls._mode_a_active and not threat_exists:
                 active_track = cls._get_active_nominal_track(nom, x_os[:2])
                 return active_track, 0.0, 1.0, "State A.2"
@@ -480,10 +480,9 @@ class DecisionLayer:
 
         domain_breached, _ = RiskCalculator.check_ship_domain_breach(x_os, x_ts)
         
-        threshold_cpa = VesselParams.R_lateral + VesselParams.B
-        cpa_risk = (dcpa < threshold_cpa) and (0.0 <= tcpa <= VesselParams.TCPA_safe)
+        cpa_risk = (dcpa < d_safe) and (0.0 <= tcpa <= VesselParams.TCPA_safe)
         
-        close_quarters = (curr_dist < d_safe * 1.5) and (dcpa < threshold_cpa) and (tcpa > -3.0)
+        close_quarters = (curr_dist < d_safe * 1.5) and (dcpa < d_safe) and (tcpa > -3.0)
         risk_active = cpa_risk or domain_breached or close_quarters
 
         # Relative longitudinal distance along OS heading (+ = TS is ahead of OS, - = TS is behind OS)

@@ -124,6 +124,10 @@ class TSSimulatorNode(Node):
         self.w_mission_ts = config['ts_mission_wps'].copy()
         self.wp_idx = 1
 
+        # --- Case 08: Dynamic Route Modification Handling ---
+        self.dynamic_event = config.get('dynamic_event', None)
+        self.event_triggered = False
+
         # Internal dynamics state [x, y, psi, r, b, u]
         raw_state = config['ts_initial_state']
         self.internal_state = np.array([
@@ -262,6 +266,36 @@ class TSSimulatorNode(Node):
         self.state_pub.publish(msg)
 
     def step_gnc_pipeline(self):
+        # --- Check Dynamic Route Modification Trigger (Case 08) ---
+        if self.dynamic_event is not None and not self.event_triggered:
+            trigger_type = self.dynamic_event.get("trigger_type", "time")
+            trigger_val = float(self.dynamic_event["trigger_value"])
+
+            should_trigger = False
+            if trigger_type == "time" and self.sim_time >= trigger_val:
+                should_trigger = True
+            elif trigger_type == "x_pos" and self.internal_state[0] <= trigger_val:
+                # e.g., TS crossed x threshold moving southbound
+                should_trigger = True
+
+            if should_trigger:
+                self.get_logger().warn(
+                    f"\033[93m[TS] Triggering dynamic route change at t={self.sim_time:.2f}s!\033[0m"
+                )
+                # Overwrite mission waypoints with revised route
+                self.w_mission_ts = self.dynamic_event["revised_ts_wps"].copy()
+                self.wp_idx = 1
+
+                # Reinitialize the horizon slicer with the new trajectory
+                self.ts_slicer = TSHorizonSlicer(self.w_mission_ts)
+
+                # Immediately publish updated intent into the comms pipeline
+                if self.share_intent:
+                    self.publish_route()
+                    self.last_route_tx_time = self.sim_time
+
+                self.event_triggered = True
+                
         # 1. Guidance & Control
         dist_to_final = float(np.linalg.norm(self.internal_state[0:2] - self.w_mission_ts[-1, 0:2]))
 
