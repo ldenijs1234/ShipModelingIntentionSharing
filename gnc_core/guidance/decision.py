@@ -246,6 +246,9 @@ class DecisionLayer:
             k_cpa = int(np.argmin(dists_nom))
             min_dist_nom = float(dists_nom[k_cpa])
 
+            # Arc-lengte langs de nominale route tot aan het geprojecteerde CPA-punt
+            s_cpa = s_os + (u_os * k_cpa * dt_sim)
+
             # 3. Encounter exit conditions
             dx = x_ts[0] - x_os[0]
             dy = x_ts[1] - x_os[1]
@@ -365,32 +368,71 @@ class DecisionLayer:
                     if abs(chi) < 1e-3 and p_cand > 0.99:
                         cand_wps = np.copy(w_os_base)
                     else:
-                        if scenario in ["Overtaking"]:
-                            # Overtaking: Form a parallel passing lane to port (Y = -0.8m)
-                            # to avoid cutting a shallow diagonal toward TS.
-                            port_lane_y = -0.8
-                            
-                            # Lateral step-out begins ahead of OS current position
-                            x_stepout = x_os[0] + max(u_os * 10.0, 5.0)
-                            wp_stepout = np.array([x_stepout, port_lane_y])
-                            
-                            # Passing waypoint aligned with CPA / TS position
-                            x_pass = max(os_traj_nom[k_cpa, 0], x_ts[0] + 3.0 * VesselParams.L)
-                            wp_pass = np.array([x_pass, port_lane_y])
-                            
-                            # Rejoin waypoint safely downstream
-                            wp_rejoin = np.array([x_pass + 10.0, w_os_base[-1, 1]])
-                            
-                            full_route = np.vstack([x_os[:2], wp_stepout, wp_pass, wp_rejoin, w_os_base[-1:, :2]])
-                        else:
-                            cos_chi = np.cos(chi)
-                            sin_chi = np.sin(chi)
-                            u_evade = np.array([
-                                u_nom[0] * cos_chi - u_nom[1] * sin_chi,
-                                u_nom[0] * sin_chi + u_nom[1] * cos_chi
-                            ])
-                            W_2 = W_1 + u_evade * D
+                        cos_chi = np.cos(chi)
+                        sin_chi = np.sin(chi)
+                        u_evade = np.array([
+                            u_nom[0] * cos_chi - u_nom[1] * sin_chi,
+                            u_nom[0] * sin_chi + u_nom[1] * cos_chi
+                        ])
+                        
+                        # Primary lateral evasion waypoint
+                        W_2 = W_1 + u_evade * D
 
+                        if scenario in ["Overtaking"]:
+                            # 1. Determine relative speed and passing distance
+                            u_cand_os = u_os * p_cand
+                            u_rel = max(u_cand_os - u_ts, 0.05)
+                            t_clear = (2.5 * VesselParams.L) / u_rel
+                            d_pass = max(u_cand_os * t_clear, 4.0 * VesselParams.L)
+
+                            # 2. Longitudinal stations along the curved route
+                            s_w1 = max(0.0, s_cpa - D)
+                            s_w2 = s_cpa
+                            s_wpass = s_cpa + d_pass
+                            s_wrejoin = s_wpass + D
+
+                            # 3. Helper to sample position and normal on curved route
+                            def get_curved_offset_point(s_target, lateral_offset):
+                                # Interpolate along route polyline
+                                accum = 0.0
+                                for i, seg_len in enumerate(seg_lens_base):
+                                    if accum + seg_len >= s_target or i == len(seg_lens_base) - 1:
+                                        ratio = np.clip((s_target - accum) / max(seg_len, 1e-4), 0.0, 1.0)
+                                        pt_centerline = cls._w_nominal[i, :2] + ratio * diffs_base[i]
+                                        
+                                        # Unit tangent and normal vectors at this segment
+                                        t_vec = diffs_base[i] / max(seg_len, 1e-4)
+                                        n_vec = np.array([-t_vec[1], t_vec[0]])  # Starboard normal
+                                        
+                                        return pt_centerline + n_vec * lateral_offset
+                                    accum += seg_len
+                                return cls._w_nominal[-1, :2]
+
+                            # Lateral offset derived from candidate angle chi
+                            lat_offset = np.sign(chi) * max(d_safe * 1.2, 1.2) if abs(chi) > 1e-3 else 0.0
+
+                            # Generate waypoints that conform to the channel curvature
+                            W_1_curved = get_curved_offset_point(s_w1, 0.0)
+                            W_2_curved = get_curved_offset_point(s_w2, lat_offset)
+                            W_pass_curved = get_curved_offset_point(s_wpass, lat_offset)
+                            W_rejoin_curved = get_curved_offset_point(s_wrejoin, 0.0)
+
+                            # Find remaining waypoints beyond the rejoin point
+                            rejoin_idx = len(cls._w_nominal) - 1
+                            accum_track = 0.0
+                            for idx, length in enumerate(seg_lens_base):
+                                accum_track += length
+                                if accum_track > s_wrejoin:
+                                    rejoin_idx = idx + 1
+                                    break
+                            remaining_wps = cls._w_nominal[rejoin_idx:, :2]
+
+                            if len(pre_w1_wps) > 0:
+                                full_route = np.vstack([pre_w1_wps, W_1_curved, W_2_curved, W_pass_curved, W_rejoin_curved, remaining_wps])
+                            else:
+                                full_route = np.vstack([W_1_curved, W_2_curved, W_pass_curved, W_rejoin_curved, remaining_wps])
+                        else:
+                            # Standard Head-On and Crossing geometry (W_1 -> W_2 -> W_3)
                             if len(pre_w1_wps) > 0:
                                 full_route = np.vstack([pre_w1_wps, W_1, W_2, W_3, remaining_wps])
                             else:
@@ -471,6 +513,7 @@ class DecisionLayer:
             urgency = np.clip((d_safe - dcpa) / max(d_safe, 1e-3), 0.0, 1.0)
             psi_headon = np.radians(30.0 + (60.0 - 30.0) * urgency)
             psi_crossing = np.radians(20.0 + (45.0 - 20.0) * urgency)
+            psi_overtaking_mag = np.radians(15.0 + (30.0 - 15.0) * urgency)
 
             if scenario == "Head-On":
                 psi_ca = psi_headon 
@@ -488,13 +531,44 @@ class DecisionLayer:
                 p_ca = 0.5 if urgency > 0.7 else 1.0
             elif scenario == "Overtaking":
                 p_ca = 1.0
-                
-                # Check lateral lane clearance between OS and TS
-                # If OS is still in TS's lane, step out to port (-25 deg)
+                psi_os = x_os[2]
+                probe_len = 10.0  # Sufficient reach to intersect canal boundaries
+
+                # Default preference: Port overtaking (-25 deg)
+                chosen_dir = -1.0  # -1.0 = Port, +1.0 = Starboard
+
+                if canal_polygons is not None:
+                    # Starboard lateral probe (+90 deg perpendicular to heading)
+                    pt_stbd = (
+                        x_os[0] + probe_len * np.cos(psi_os + np.pi / 2.0),
+                        x_os[1] + probe_len * np.sin(psi_os + np.pi / 2.0)
+                    )
+                    # Port lateral probe (-90 deg perpendicular to heading)
+                    pt_port = (
+                        x_os[0] + probe_len * np.cos(psi_os - np.pi / 2.0),
+                        x_os[1] + probe_len * np.sin(psi_os - np.pi / 2.0)
+                    )
+
+                    dist_stbd = float(LineString([(x_os[0], x_os[1]), pt_stbd]).distance(canal_polygons))
+                    dist_port = float(LineString([(x_os[0], x_os[1]), pt_port]).distance(canal_polygons))
+
+                    # Minimum lateral clearance required to execute an evasive lane shift
+                    min_room_needed = VesselParams.DCPA_safe * 1.2 + VesselParams.d_safe_static
+
+                    # If port side is constrained and starboard offers more navigable water:
+                    # Overtake on Starboard (+15-30 deg)
+                    if dist_port < min_room_needed and dist_stbd > dist_port:
+                        chosen_dir = 1.0
+                    else:
+                        # If both sides are clear or port offers more room:
+                        # Maintain Port overtaking (-15-30 deg) per inland regulations
+                        chosen_dir = -1.0
+
+                # 1. Step out toward the chosen side (-15-30 deg for Port, +15-30 deg for Starboard)
                 if dy_rel < (VesselParams.DCPA_safe * 1.2):
-                    psi_ca = np.radians(-25.0)
+                    psi_ca = psi_overtaking_mag * chosen_dir
                 else:
-                    # Once in the port lane, STRAIGHTEN OUT to run parallel and pass TS
+                    # 2. Once clear in the overtaking lane: run parallel to pass TS safely
                     psi_ca = 0.0
             else:
                 psi_ca = np.radians(30.0)
@@ -527,8 +601,6 @@ class DecisionLayer:
                         p_ca = 0.0
                         psi_ca = 0.0
 
-            print(f"[DEBUG MODE B] Scenario: {scenario}, psi_ca: {np.degrees(psi_ca):.1f}, "
-                  f"mode_b: {cls._mode_b_active}")
             return np.copy(w_os), float(psi_ca), float(p_ca), "State B.1"
 
         active_track = cls._get_active_nominal_track(nom, x_os[:2])
