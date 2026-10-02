@@ -19,9 +19,9 @@ def compute_safety_risk_factors(
     d_safe: float = 1.0,
     d_max: float = 2.8,
     eps_tol: float = 0.05,
-    max_rudder_rate_deg_s: float = 30.0,
-    w_dist: float = 0.6,
-    w_steer: float = 0.4,
+    max_rudder_rate_deg_s: float = 90.0,
+    w_dist: float = 0.5,
+    w_steer: float = 0.5,
 ):
     """
     Computes normalized risk factors in [0, 1] for proximity and steering change.
@@ -345,9 +345,9 @@ def run_dynamic_batch(log_dir=None, d_safe=VesselParams.DCPA_safe):
         evaluator = ScenarioKPIEvaluator(
             d_safe=d_safe,
             nominal_waypoints=nominal_wps,
-            w_cte=0.5,
-            w_ctrl=0.3,
-            w_speed=0.2,
+            w_cte=1/3,
+            w_ctrl=1/3,
+            w_speed=1/3,
         )
 
         kpi_ra = evaluator.evaluate_single_run(

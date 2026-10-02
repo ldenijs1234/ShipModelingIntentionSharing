@@ -6,7 +6,6 @@ from gnc_core.imazu_cases.case04.case04_config import CASE04_CONFIG
 from gnc_core.imazu_cases.case05.case05_config import CASE05_CONFIG
 from gnc_core.imazu_cases.case06.case06_config import CASE06_CONFIG
 from gnc_core.imazu_cases.case07.case07_config import CASE07_CONFIG
-from gnc_core.imazu_cases.case08.case08_config import CASE08_CONFIG
 
 def load_scenario(name: str):
     cases = {
@@ -16,8 +15,7 @@ def load_scenario(name: str):
         "case04": CASE04_CONFIG,
         "case05": CASE05_CONFIG,
         "case06": CASE06_CONFIG,
-        "case07": CASE07_CONFIG,
-        "case08": CASE08_CONFIG
+        "case07": CASE07_CONFIG
     }
     if name.lower() not in cases:
         raise ValueError(f"Unknown scenario '{name}'. Available: {list(cases.keys())}")
