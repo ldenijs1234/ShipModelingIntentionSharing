@@ -12,9 +12,9 @@ echo "Starting Automated Simulation Batch"
 echo "Timestamp: $(date '+%Y-%m-%d %H:%M:%S')"
 echo "=========================================================="
 
-SCENARIOS=("case05")
-INTERVALS=(6.0)
-LATENCIES=(0.0 1.0 2.0 3.0 4.0 5.0 6.0 7.0 8.0 9.0 10.0)
+SCENARIOS=("case01" "case02" "case03" "case04" "case05" "case06" "case07")
+INTERVALS=(6.0 8.5 11.0)
+LATENCIES=(0.0 2.5 5.0 7.5 10.0 12.5 15.0)
 
 TOTAL_RUNS=$(( ${#SCENARIOS[@]} * (1 + ${#INTERVALS[@]} * ${#LATENCIES[@]}) ))
 CURRENT_RUN=0
