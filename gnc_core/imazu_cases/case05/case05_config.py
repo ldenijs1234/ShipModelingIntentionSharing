@@ -38,11 +38,11 @@ CASE05_CONFIG = {
     "description": "Harbor turn encounter with curved channel (Trimmed Exit)",
 
     # OS starts at x = -26.0 m, finishes at x = 14.0 m
-    "os_initial_state": np.array([-26.0, 2.0, 0.0, 0.45, 0.0, 0.0], dtype=np.float64),
+    "os_initial_state": np.array([-26.0, 0.0, 0.0, 0.45, 0.0, 0.0], dtype=np.float64),
     "os_mission_wps": np.array([
-        [-26.0, 2.0],
-        [  0.0, 2.0],
-        [ 14.0, 4.0]
+        [-26.0, 0.0],
+        [  0.0, 0.0],
+        [ 14.0, 2.0]
     ], dtype=np.float64),
     "os_nominal_speed": 0.45,
 
@@ -50,8 +50,8 @@ CASE05_CONFIG = {
     "ts_initial_state": np.array([30.0, -2.0, np.pi, 0.45, 0.0, 0.0], dtype=np.float64),
     "ts_mission_wps": np.array([
         [ 30.0, -2.0],
-        [  5.0, -2.0],
-        [ -2.0, 10.0]
+        [  3.0, -2.0],
+        [ -1.0, 10.0]
     ], dtype=np.float64),
     "ts_nominal_speed": 0.45,
 

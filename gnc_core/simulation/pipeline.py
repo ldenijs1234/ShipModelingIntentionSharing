@@ -58,28 +58,24 @@ class SynchronousPipeline:
                     best_idx = idx + 1
                     break
             cached["wp_idx"] = max(1, best_idx)
-        elif cached["state"] == "State A.1" and prev_state != "State A.1":
+            
+        # Reset waypoint index when entering ANY evasion mode or when the route dynamically updates
+        elif (cached["state"] in ["State A.1", "State B.1"] and prev_state not in ["State A.1", "State B.1"]):
             cached["wp_idx"] = 1
         elif len(cached["w_active"]) != prev_route_len:
             cached["wp_idx"] = 1
 
-        # 3. Guidance Layer
+        # 3. Guidance Layer (LOS Waypoint Tracking applies universally now)
         cached["psi_wp"], _, cached["wp_idx"] = LOSGuidance.compute_heading_reference(
             x_os, cached["w_active"], cached.get("wp_idx", 1)
         )
 
-        # In State B.1, base heading command on active segment track direction (pi_p)
-        # rather than allowing cross-track error to cancel out psi_ca
-        if cached["state"] == "State B.1":
-            active_idx = max(1, min(cached.get("wp_idx", 1), len(w_mission_os) - 1))
-            p_start = w_mission_os[active_idx - 1]
-            p_end = w_mission_os[active_idx]
-            pi_p = float(np.arctan2(p_end[1] - p_start[1], p_end[0] - p_start[0]))
-            psi_guidance_ref = pi_p
-        else:
-            psi_guidance_ref = cached["psi_wp"]
+        # Removed legacy State B.1 tangent override. 
+        # All modes now smoothly track their active route via LOS.
+        psi_guidance_ref = cached["psi_wp"]
 
         # 4. Control Layer (Eq. 3.42: psi_cmd = psi_ref + psi_ca)
+        # Note: psi_ca is now inherently 0.0 from the DecisionLayer for unified geometries
         target_speed = float(u_nominal * cached.get("p_ca", 1.0))
         
         u_c, tau_c, psi_cmd = Autopilot.compute_control(

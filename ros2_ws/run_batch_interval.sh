@@ -6,7 +6,7 @@
 # Example: ./run_batch_interval.sh case05 15.0 3.0
 # ==============================================================================
 
-SCENARIO=("case01" "case02" "case03" "case04" "case05")
+SCENARIO=("case01" "case02" "case03" "case04" "case05" "case06" "case07")
 INTENT_RANGE=10.0
 SPEED_FACTOR=2.0
 TAU_FIXED=0.0
@@ -29,17 +29,17 @@ mkdir -p "${LOG_DIR}"
 for SCENARIO in "${SCENARIO[@]}"; do
     echo -e "\n\033[92m>>> Running Scenario: ${SCENARIO} <<<\033[0m"
     
-    # 1. Run Reactive Avoidance (RA) Baseline
-    # echo -e "\n\033[96m>>> Running Baseline: Reactive Avoidance (WITHOUT Intent) <<<\033[0m"
-    # "${WS_DIR}/run_scenario.sh" "${SCENARIO}" "${TAU_FIXED}" False 0.0 "${SPEED_FACTOR}" True "${INTENT_RANGE}" True
-    # sleep 1
+    #1. Run Reactive Avoidance (RA) Baseline
+    echo -e "\n\033[96m>>> Running Baseline: Reactive Avoidance (WITHOUT Intent) <<<\033[0m"
+    "${WS_DIR}/run_scenario.sh" "${SCENARIO}" "${TAU_FIXED}" False 0.0 "${SPEED_FACTOR}" True "${INTENT_RANGE}" False
+    sleep 1
 
     # 2. Sweep over Broadcast Intervals with Intent Sharing (IS) Active
-    for INTERVAL in "${INTERVAL_LIST[@]}"; do
-        echo -e "\n\033[93m>>> Running IS Scenario: Interval = ${INTERVAL}s | Latency = ${TAU_FIXED}s <<<\033[0m"
-        "${WS_DIR}/run_scenario.sh" "${SCENARIO}" "${TAU_FIXED}" True "${INTERVAL}" "${SPEED_FACTOR}" True "${INTENT_RANGE}" True
-        sleep 1
-    done
+    # for INTERVAL in "${INTERVAL_LIST[@]}"; do
+    #     echo -e "\n\033[93m>>> Running IS Scenario: Interval = ${INTERVAL}s | Latency = ${TAU_FIXED}s <<<\033[0m"
+    #     "${WS_DIR}/run_scenario.sh" "${SCENARIO}" "${TAU_FIXED}" True "${INTERVAL}" "${SPEED_FACTOR}" True "${INTENT_RANGE}" True
+    #     sleep 1
+    # done
 done
 
 # 1. Resolve and navigate to the project root directory

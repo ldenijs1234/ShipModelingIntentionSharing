@@ -15,14 +15,21 @@ poly_port = Polygon([
     (-35.0, -6.0)
 ])
 
-poly_starboard = Polygon([
-    (-35.0, 15.0),
+poly_starboard_north = Polygon([
+    (5.0, 15.0),
     (35.0, 15.0),
     (35.0, 6.0),
+    (5.0, 6.0)
+])
+
+poly_starboard_south = Polygon([
+    (-35.0, 15.0),
+    (-25.0, 15.0),
+    (-25.0, 6.0),
     (-35.0, 6.0)
 ])
 
-poly_canal_full = so.unary_union([poly_port, poly_starboard])
+poly_canal_full = so.unary_union([poly_port, poly_starboard_north, poly_starboard_south])
 
 CASE02_CONFIG = {
     "name": "case02",
@@ -36,24 +43,25 @@ CASE02_CONFIG = {
         "x_max": 35.0
     },
 
-    # Own Ship (Blue) finishes at X = 14.0 m
-    "os_initial_state": np.array([-30.0, 0.0, 0.0, 0.45, 0.0, 0.0], dtype=np.float64),
+    # Own Ship (Blue) 
+    # Starts at North = -20.0, heads straight North
+    "os_initial_state": np.array([-20.0, 0.0, 0.0, 0.45, 0.0, 0.0], dtype=np.float64),
     "os_nominal_speed": 0.45,
     "os_mission_wps": np.array([
-        [-30.0, 0.0],
-        [-10.0, 0.0],
-        [ -2.0, 0.0],
-        [  5.0, 0.0],
-        [ 14.0, 0.0]
+        [-20.0,  0.0],
+        [ 20.0,  0.0]
     ], dtype=np.float64),
 
-    # Target Ship ends shortly after clearing the channel at X = -8.0 m
-    "ts_initial_state": np.array([30.0, -1.0, np.pi, 0.45, 0.0, 0.0], dtype=np.float64),
+    # Target Ship (Magenta/Red)
+    # Starts at North = 20.0. 
+    # Easting is -0.5m (Deep inside OS's 1.0m safety domain to trigger immediate evasion)
+    "ts_initial_state": np.array([20.0, -1.5, np.pi, 0.45, 0.0, 0.0], dtype=np.float64),
     "ts_nominal_speed": 0.45,
     "ts_mission_wps": np.array([
-        [ 30.0, -1.0],
-        [  4.0, -1.0],
-        [ -8.0,  5.0]
+        [ 20.0, -1.5],   # Start (Matches Akdag [-100, 2000])
+        [ 3.0, -1.5],   # Turn Point (Matches Akdag [-100, 500])
+        [-20.0, 5.5]    # End Point (Matches Akdag [1000, -2000] retaining the 23.7 deg angle)
     ], dtype=np.float64),
-    "t_sim": 95.0
+    
+    "t_sim": 120.0
 }
