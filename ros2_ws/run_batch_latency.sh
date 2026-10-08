@@ -24,13 +24,13 @@ for SCENARIO in "${SCENARIOS[@]}"; do
     echo ">>> Running Baseline (RA) for ${SCENARIO}..."
     # Mode B: Baseline Reactive Avoidance (Run once per scenario)
     # Parameters: SCENARIO, TAU, SHARE_INTENT, INTERVAL, SPEED, AUTO_CLOSE, INTENT_RANGE, HEADLESS
-    ./run_scenario.sh "${SCENARIO}" 0.0 False 0.0 5.0 True 15.0 True
+    ./run_scenario.sh "${SCENARIO}" 0.0 False 0.0 2.0 True 15.0 True
 
     for INTERVAL in "${INTERVALS[@]}"; do
         for TAU in "${LATENCIES[@]}"; do
             CURRENT_RUN=$((CURRENT_RUN + 1))
             echo ">>> Running IS for ${SCENARIO} | Interval=${INTERVAL}s | Tau=${TAU}s..."
-            ./run_scenario.sh "${SCENARIO}" "${TAU}" True "${INTERVAL}" 5.0 True 15.0 True
+            ./run_scenario.sh "${SCENARIO}" "${TAU}" True "${INTERVAL}" 2.0 True 15.0 True
         done
     done
 done

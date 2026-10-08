@@ -60,7 +60,7 @@ CASE02_CONFIG = {
     "ts_mission_wps": np.array([
         [ 20.0, -1.5],   # Start (Matches Akdag [-100, 2000])
         [ 3.0, -1.5],   # Turn Point (Matches Akdag [-100, 500])
-        [-20.0, 5.5]    # End Point (Matches Akdag [1000, -2000] retaining the 23.7 deg angle)
+        [-20.0, 7.5]    # End Point (Matches Akdag [1000, -2000] retaining the 23.7 deg angle)
     ], dtype=np.float64),
     
     "t_sim": 120.0

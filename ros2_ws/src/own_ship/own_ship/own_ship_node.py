@@ -195,6 +195,7 @@ class OSTransceiverNode(Node):
         # --- Intent Timing Diagnostics ---
         self.t_first_intent_rx: Optional[float] = None
         self.t_advance: Optional[float] = None
+        self.intent_packet_buffer: list[tuple[float, np.ndarray, np.ndarray]] = []
 
         StateEstimation.reset()
 
@@ -254,48 +255,35 @@ class OSTransceiverNode(Node):
         self.x_ts_est = fresh_state.copy()
 
     def ts_route_callback(self, msg: RouteIntent):
-        # Ignore intent broadcast packets when outside communication range
-        if not self.in_intent_range:
+        # Ignore if we don't have TS tracking info yet
+        if self.x_ts_est is None:
             return
 
-        self.w_ts_delayed = np.array([[pt.x, pt.y] for pt in msg.route], dtype=np.float64)
+        # 1. Transmitter Range Check at Transmission Time (t_tx):
+        dist_at_tx = float(np.linalg.norm(self.internal_state[:2] - self.x_ts_est[:2]))
 
-        # First-time reception trigger and t_advance calculation
-        if self.t_first_intent_rx is None:
-            self.t_first_intent_rx = float(self.sim_time)
-            self.t_intent_shared = float(self.sim_time)
+        u_os = self.internal_state[5]
+        psi_os = self.internal_state[2]
+        v_os = np.array([u_os * np.cos(psi_os), u_os * np.sin(psi_os)])
 
-            if self.x_ts_est is not None and abs(self.x_ts_est[0]) < 900.0:
-                p_os = self.internal_state[:2]
-                psi_os = self.internal_state[2]
-                u_os = self.internal_state[5]
-                v_os_vec = np.array([u_os * np.cos(psi_os), u_os * np.sin(psi_os)])
+        u_ts = self.x_ts_est[3]
+        psi_ts = self.x_ts_est[2]
+        v_ts = np.array([u_ts * np.cos(psi_ts), u_ts * np.sin(psi_ts)])
 
-                p_ts = self.x_ts_est[:2]
-                psi_ts = self.x_ts_est[2]
-                u_ts = self.x_ts_est[3]
-                v_ts_vec = np.array([u_ts * np.cos(psi_ts), u_ts * np.sin(psi_ts)])
+        v_rel_norm = float(np.linalg.norm(v_os - v_ts))
+        t_tactical_sim = 300.0 / np.sqrt(30.0)
+        dynamic_r_is = max(self.min_intent_range, v_rel_norm * t_tactical_sim)
+        r_connect = max(float(self.min_intent_range), float(dynamic_r_is))
 
-                dp = p_ts - p_os
-                dv = v_ts_vec - v_os_vec
-                dv_sq = float(np.dot(dv, dv))
+        # Drop packet if broadcast occurred while TS was still outside radio range
+        if dist_at_tx > r_connect:
+            return
 
-                if dv_sq > 1e-4:
-                    tcpa_relative = -float(np.dot(dp, dv)) / dv_sq
-                    self.t_advance = tcpa_relative
-                else:
-                    self.t_advance = np.nan
-            else:
-                self.t_advance = np.nan
+        # 2. Schedule Delivery Time with Latency (tau)
+        t_tx = float(self.sim_time)
+        t_delivery = t_tx + self.sim_latency
 
-            t_adv_str = f"{self.t_advance:.2f}s" if np.isfinite(self.t_advance) else "N/A"
-            self.get_logger().info(
-                f"\033[95m[INTENT RX] First packet received at t={self.t_first_intent_rx:.2f}s | "
-                f"t_advance (TCPA margin): {t_adv_str}\033[0m"
-            )
-
-        # Forward the perceived intent to the live plotter
-        self.ts_perceived_route_pub.publish(msg)
+        self.intent_packet_buffer.append((t_delivery, msg))
 
     def step_gnc_pipeline(self):
         if self.sim_finished:
@@ -376,6 +364,64 @@ class OSTransceiverNode(Node):
             x_ts_for_gnc = np.array([999.0, 999.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float64)
 
         prev_state = self.cached["state"]
+
+        # --- Approach 1: Process Incoming Intent Delivery Queue ---
+        ready_packets = []
+        pending_packets = []
+        for t_deliv, msg_candidate in self.intent_packet_buffer:
+            if self.sim_time >= t_deliv:
+                ready_packets.append((t_deliv, msg_candidate))
+            else:
+                pending_packets.append((t_deliv, msg_candidate))
+        self.intent_packet_buffer = pending_packets
+
+        # If a packet reached its delivery time and OS is within valid range:
+        if ready_packets and self.in_intent_range:
+            # Promote the latest delivered packet to active intent
+            _, latest_delivered_msg = ready_packets[-1]
+            self.w_ts_delayed = np.array([[pt.x, pt.y] for pt in latest_delivered_msg.route], dtype=np.float64)
+
+            # --- Evaluate t_first_intent_rx and t_advance at Actual Delivery ---
+            if self.t_first_intent_rx is None:
+                self.t_first_intent_rx = float(self.sim_time)
+                self.t_intent_shared = float(self.sim_time)
+
+                if self.x_ts_est is not None and abs(self.x_ts_est[0]) < 900.0:
+                    p_os = self.internal_state[:2]
+                    psi_os = self.internal_state[2]
+                    u_os = self.internal_state[5]
+                    v_os_vec = np.array([u_os * np.cos(psi_os), u_os * np.sin(psi_os)])
+
+                    p_ts = self.x_ts_est[:2]
+                    psi_ts = self.x_ts_est[2]
+                    u_ts = self.x_ts_est[3]
+                    v_ts_vec = np.array([u_ts * np.cos(psi_ts), u_ts * np.sin(psi_ts)])
+
+                    dp = p_ts - p_os
+                    dv = v_ts_vec - v_os_vec
+                    dv_sq = float(np.dot(dv, dv))
+
+                    if dv_sq > 1e-4:
+                        tcpa_relative = -float(np.dot(dp, dv)) / dv_sq
+                        self.t_advance = tcpa_relative
+                    else:
+                        self.t_advance = np.nan
+                else:
+                    self.t_advance = np.nan
+
+                t_adv_str = f"{self.t_advance:.2f}s" if np.isfinite(self.t_advance) else "N/A"
+                self.get_logger().info(
+                    f"\033[95m[INTENT RX] First packet received at t={self.t_first_intent_rx:.2f}s | "
+                    f"t_advance (TCPA margin): {t_adv_str}\033[0m"
+                )
+
+            # Forward the perceived intent to the live plotter
+            self.ts_perceived_route_pub.publish(latest_delivered_msg)
+
+        # Clear buffer if vessels disengage or drop out of range
+        if not self.in_intent_range:
+            self.w_ts_delayed = None
+            self.intent_packet_buffer.clear()
 
         # 2. Step Synchronous Pipeline
         self.internal_state, self.cached, telemetry = SynchronousPipeline.step(
