@@ -35,6 +35,7 @@ CASE06_CONFIG = {
         "x_min": -40.0,
         "x_max": 70.0
     },
+    "canal_width": 12.0,
 
     # Own Ship (Faster vessel: 0.52 m/s, starts behind at X = -35.0 m)
     "os_initial_state": np.array([-35.0, 1.8, 0.0, 0.52, 0.0, 0.0], dtype=np.float64),

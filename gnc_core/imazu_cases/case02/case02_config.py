@@ -37,11 +37,12 @@ CASE02_CONFIG = {
 
     "canal_polygons": poly_canal_full,
     "canal_bounds": {
-        "y_min": -4.0,
-        "y_max": 4.0,
+        "y_min": -6.0,
+        "y_max": 6.0,
         "x_min": -35.0,
         "x_max": 35.0
     },
+    "canal_width": 12.0,
 
     # Own Ship (Blue) 
     # Starts at North = -20.0, heads straight North
@@ -59,8 +60,8 @@ CASE02_CONFIG = {
     "ts_nominal_speed": 0.45,
     "ts_mission_wps": np.array([
         [ 20.0, -1.5],   # Start (Matches Akdag [-100, 2000])
-        [ 3.0, -1.5],   # Turn Point (Matches Akdag [-100, 500])
-        [-20.0, 7.5]    # End Point (Matches Akdag [1000, -2000] retaining the 23.7 deg angle)
+        [ 5.0, -1.5],   # Turn Point (Matches Akdag [-100, 500])
+        [-20.0, 5.0]    # End Point (Matches Akdag [1000, -2000] retaining the 23.7 deg angle)
     ], dtype=np.float64),
     
     "t_sim": 120.0

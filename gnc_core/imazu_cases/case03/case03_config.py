@@ -42,6 +42,7 @@ CASE03_CONFIG = {
         "x_min": -30.0,
         "x_max": 20.0
     },
+    "canal_width": 8.0,
 
     # Own Ship (Blue) starts South at X = -25.0 m, finishes at X = 12.0 m
     # Reaches (0,0) in exactly 55.5 s

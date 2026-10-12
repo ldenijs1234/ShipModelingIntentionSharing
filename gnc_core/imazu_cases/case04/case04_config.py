@@ -72,6 +72,7 @@ CASE04_CONFIG = {
         "x_min": -25.0,
         "x_max":  45.0
     },
+    "canal_width": 22.0,
 
     "os_initial_state": np.array(
         [os_wps[0, 0], os_wps[0, 1], psi_os_init, 0.5, 0.0, 0.0], dtype=np.float64

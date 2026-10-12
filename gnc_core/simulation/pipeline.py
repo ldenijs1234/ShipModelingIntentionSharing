@@ -20,7 +20,8 @@ class SynchronousPipeline:
         cached: Dict[str, Any],
         dt: float = 0.1,       # Default strictly to 10 Hz
         u_nominal: float = 0.5,
-        canal_polygons = None
+        canal_polygons = None,
+        canal_width: float = 6.0
     ) -> Tuple[np.ndarray, Dict[str, Any], Dict[str, Any]]:
         
         # 1. State Estimation (10 Hz)
@@ -35,7 +36,7 @@ class SynchronousPipeline:
 
         # Unpack the 4 returned values, including the speed multiplier 'p_ca'
         cached["w_active"], cached["psi_ca"], cached["p_ca"], cached["state"] = DecisionLayer.evaluate(
-            x_os, x_ts, w_mission_os, w_ts_delayed, cached["dcpa"], cached["tcpa"], u_nominal, canal_polygons
+            x_os, x_ts, w_mission_os, w_ts_delayed, cached["dcpa"], cached["tcpa"], u_nominal, canal_polygons, canal_width
         )
 
         # Re-anchor downstream waypoint index upon state transitions back to nominal mission

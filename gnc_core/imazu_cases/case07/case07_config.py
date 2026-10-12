@@ -35,6 +35,7 @@ CASE07_CONFIG = {
         "x_min": -40.0,
         "x_max": 70.0
     },
+    "canal_width": 12.0,
 
     # Own Ship (OS starts at X = -35.0 m, heading North along Y = 1.0 m)
     "os_initial_state": np.array([-35.0, 1.0, 0.0, 0.52, 0.0, 0.0], dtype=np.float64),

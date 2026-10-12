@@ -35,6 +35,7 @@ CASE01_CONFIG = {
         "x_min": -25.0,
         "x_max": 50.0
     },
+    "canal_width": 6.0,
 
     # Own Ship (OS) Initial Conditions & Route
     "os_initial_state": np.array([-20.0, 0.0, 0.0, 0.5, 0.0, 0.0], dtype=np.float64),

@@ -56,5 +56,6 @@ CASE05_CONFIG = {
     "ts_nominal_speed": 0.45,
 
     "canal_polygons": canal_multipolygon,
+    "canal_width": 20.0,
     "t_sim": 95.0
 }

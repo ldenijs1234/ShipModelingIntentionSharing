@@ -137,6 +137,7 @@ class OSTransceiverNode(Node):
         self.w_mission_ts_nominal = config['ts_mission_wps'].copy()
         self.canal_polygons = config.get('canal_polygons', None)
         self.canal_bounds = config.get('canal_bounds', None)
+        self.canal_width = float(config.get('canal_width', 6.0))
 
         # Internal state format [x, y, psi, r, b, u]
         raw_state = config['os_initial_state']
@@ -433,6 +434,7 @@ class OSTransceiverNode(Node):
             dt=self.dt,
             u_nominal=u_target,
             canal_polygons=self.canal_polygons,
+            canal_width=self.canal_width,
         )
 
         if self.cached["state"] != prev_state:
