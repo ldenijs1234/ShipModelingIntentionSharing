@@ -5,7 +5,8 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-
+import matplotlib.patches as mpatches
+from matplotlib.patches import FancyArrowPatch
 from gnc_core.config.vessel_params import VesselParams
 from gnc_core.tests.kpi_evaluator import ScenarioKPIEvaluator
 
@@ -70,56 +71,12 @@ def compute_safety_risk_factors(
     return float(np.clip(combined_risk, 0.0, 1.15))
 
 
-def plot_safety_assessment_chart(summary_df: pd.DataFrame, title_suffix: str = "", filename: str = "safety_assessment.png"):
-    """Generates the 4-tier safety assessment bar chart with clean layout."""
-    if summary_df.empty:
-        return
-
-    fig, ax = plt.subplots(figsize=(11, 5.5), dpi=300)
-
-    # 1. Four-tier Background Risk Bands
-    ax.axhspan(0.00, 0.35, color='#F0FFF0', alpha=0.6)  # LOW
-    ax.axhspan(0.35, 0.70, color='#FFFFE0', alpha=0.6)  # MODERATE
-    ax.axhspan(0.70, 1.00, color='#FFF0F5', alpha=0.6)  # HIGH
-    ax.axhspan(1.00, 1.20, color='#B22222', alpha=0.25, hatch='//')  # BREACH
-
-    # Risk Labels aligned on the right edge
-    x_pos = len(summary_df) - 0.4
-    ax.text(x_pos, 0.17, "LOW RISK", color='#2E8B57', fontweight='bold', fontsize=9)
-    ax.text(x_pos, 0.52, "MODERATE RISK", color='#B8860B', fontweight='bold', fontsize=9)
-    ax.text(x_pos, 0.85, "HIGH RISK", color='#A52A2A', fontweight='bold', fontsize=9)
-    ax.text(x_pos, 1.08, "BREACH", color='#800000', fontweight='bold', fontsize=9)
-
-    # 2. Side-by-Side Bars
-    x = np.arange(len(summary_df))
-    width = 0.35
-    scenarios = summary_df['scenario'].tolist()
-
-    ax.bar(x - width/2, summary_df['R_safety_RA'], width, label='RA Baseline', color='#2b5c8f')
-    ax.bar(x + width/2, summary_df['R_safety_IS'], width, label='IS (Mean across intervals)', color='#41ab5d')
-
-    # Breach threshold line
-    ax.axhline(1.0, color='red', linestyle='--', linewidth=1.2, label='Breach Threshold (R_safety >= 1.0)')
-
-    ax.set_ylim(-0.05, 1.20)
-    ax.set_xlim(-0.6, len(scenarios) - 0.2)
-    ax.set_xticks(x)
-    ax.set_xticklabels(scenarios, fontweight='bold', fontsize=10)
-    ax.set_ylabel(r"Safety Risk Factor $R_{\mathrm{safety}}$", fontweight='bold')
-    ax.set_title(f"Safety Assessment: Proximity & Rudder Rate Risk {title_suffix}", fontweight='bold')
-    ax.grid(True, linestyle=':', alpha=0.5)
-    ax.legend(loc='upper left', framealpha=0.9)
-
-    plt.tight_layout()
-    out_dir = REPO_ROOT / "results_plots"
-    os.makedirs(out_dir, exist_ok=True)
-    out_path = out_dir / filename
-    plt.savefig(out_path, dpi=300)
-    plt.close(fig)
-    print(f"[SUCCESS] Saved safety assessment plot to: {out_path}")
-
-
-def extract_model_data(log_dir=None, d_safe=VesselParams.DCPA_safe, r_max=2.8):
+def extract_model_data(log_dir=None, d_safe=VesselParams.DCPA_safe, L_os=VesselParams.L):
+    """
+    Extracts trajectory features from Own Thesis Model (.npz simulation logs).
+    Computes turn direction, peak course alteration, dimensionless yaw rate,
+    normalized lateral deviation, and minimum separation distance.
+    """
     if log_dir is None:
         log_dir = REPO_ROOT / "simulation_logs"
     else:
@@ -145,62 +102,84 @@ def extract_model_data(log_dir=None, d_safe=VesselParams.DCPA_safe, r_max=2.8):
 
     for sc in scenarios:
         sc_runs = [r for r in runs if r["scenario"] == sc]
-        ra_runs = [r for r in sc_runs if r["mode"] == "RA"]
-        is_runs = [r for r in sc_runs if r["mode"] == "IS"]
         model_data[sc] = {}
 
-        # Process RA
-        if ra_runs:
-            d = ra_runs[0]["data"]
-            ranges = np.linalg.norm(d["ts_pos"] - d["os_pos"], axis=1)
-            r_min = float(np.min(ranges))
-            os_r = d["os_r"]
-            if np.max(np.abs(os_r)) < 1.5:
-                peak_rate = float(np.rad2deg(np.max(np.abs(os_r))))
-            else:
-                peak_rate = float(np.max(np.abs(os_r)))
+        for mode in ["RA", "IS"]:
+            matching = [r for r in sc_runs if r["mode"] == mode]
+            if not matching:
+                continue
 
-            risk = compute_safety_risk_factors(
-                min_dist=r_min, rudder_history=os_r, time_history=d["t"],
-                d_safe=d_safe, d_max=2.8, eps_tol=0.05, max_rudder_rate_deg_s=90.0,
-                w_dist=0.6, w_steer=0.4
-            )
-            model_data[sc]["RA"] = {
-                "r_min": r_min, "peak_rate": peak_rate, "risk": risk
-            }
+            # In IS mode, average over multi-interval batch logs if present
+            r_mins, peak_dchis, peak_r_primes, peak_ey_Ls = [], [], [], []
+            initial_turns = []
 
-        # Process IS (Average across intervals/latencies)
-        if is_runs:
-            r_mins, peak_rates, risks = [], [], []
-            for r in is_runs:
-                d = r["data"]
-                ranges = np.linalg.norm(d["ts_pos"] - d["os_pos"], axis=1)
+            for run in matching:
+                d = run["data"]
+                os_pos = d["os_pos"]
+                ts_pos = d["ts_pos"]
+                t = d["t"]
+
+                # 1. Minimum Obstacle Distance
+                ranges = np.linalg.norm(ts_pos - os_pos, axis=1)
                 r_min = float(np.min(ranges))
-                os_r = d["os_r"]
-                if np.max(np.abs(os_r)) < 1.5:
-                    peak_rate = float(np.rad2deg(np.max(np.abs(os_r))))
-                else:
-                    peak_rate = float(np.max(np.abs(os_r)))
-
-                risk = compute_safety_risk_factors(
-                    min_dist=r_min, rudder_history=os_r, time_history=d["t"],
-                    d_safe=d_safe, d_max=2.8, eps_tol=0.05, max_rudder_rate_deg_s=90.0,
-                    w_dist=0.6, w_steer=0.4
-                )
                 r_mins.append(r_min)
-                peak_rates.append(peak_rate)
-                risks.append(risk)
 
-            model_data[sc]["IS"] = {
+                # 2. Heading Extraction & Initial Turn Direction
+                if "os_psi" in d:
+                    psi = np.unwrap(d["os_psi"])
+                elif "os_states" in d and d["os_states"].shape[1] >= 3:
+                    psi = np.unwrap(d["os_states"][:, 2])
+                else:
+                    diffs = np.diff(os_pos, axis=0)
+                    psi = np.unwrap(np.arctan2(diffs[:, 1], diffs[:, 0]))
+                    psi = np.pad(psi, (0, 1), mode='edge')
+
+                d_chi = np.rad2deg(psi - psi[0])
+                peak_dchi = float(np.max(np.abs(d_chi)))
+                peak_dchis.append(peak_dchi)
+
+                # Initial Turn Side: Sign of first significant deviation (> 1.5 deg or > 0.05m y)
+                turn_idx = np.where(np.abs(d_chi) > 1.5)[0]
+                if len(turn_idx) > 0:
+                    turn_side = "S" if d_chi[turn_idx[0]] > 0 else "P"
+                else:
+                    y_dev = os_pos[:, 1] - os_pos[0, 1]
+                    lat_idx = np.where(np.abs(y_dev) > 0.05)[0]
+                    turn_side = ("S" if y_dev[lat_idx[0]] > 0 else "P") if len(lat_idx) > 0 else "None"
+                initial_turns.append(turn_side)
+
+                # 3. Dimensionless Yaw Rate r' = (r * L) / u
+                os_r = d["os_r"]
+                r_rad_s = os_r if np.max(np.abs(os_r)) < 1.5 else np.deg2rad(os_r)
+                dt = np.diff(t)
+                valid_dt = np.where(dt > 1e-4, dt, 1e-4)
+                velocities = np.linalg.norm(np.diff(os_pos, axis=0), axis=1) / valid_dt
+                u_mean = float(np.mean(velocities[velocities > 0.05])) if np.any(velocities > 0.05) else 0.45
+                r_prime = np.abs(r_rad_s) * L_os / max(u_mean, 0.05)
+                peak_r_primes.append(float(np.max(r_prime)))
+
+                # 4. Dimensionless Lateral Deviation ey / L
+                ey = np.abs(os_pos[:, 1] - os_pos[0, 1])
+                peak_ey_Ls.append(float(np.max(ey) / L_os))
+
+            # Store aggregated case metrics
+            model_data[sc][mode] = {
+                "initial_turn": max(set(initial_turns), key=initial_turns.count) if initial_turns else "None",
                 "r_min": float(np.mean(r_mins)),
-                "peak_rate": float(np.mean(peak_rates)),
-                "risk": float(np.mean(risks))
+                "d_safe": float(d_safe),
+                "r_min_ratio": float(np.mean(r_mins)) / float(d_safe),
+                "peak_dchi": float(np.mean(peak_dchis)),
+                "peak_r_prime": float(np.mean(peak_r_primes)),
+                "peak_ey_L": float(np.mean(peak_ey_Ls)),
             }
 
     return model_data
 
 
-def extract_akdag_data(csv_dir=AKDAG_CSV_DIR, d_safe=300.0, r_max_deg_s=3.0):
+def extract_akdag_data(csv_dir=AKDAG_CSV_DIR, d_safe=300.0, L_akdag=110.0, u_nominal=5.0):
+    """
+    Extracts trajectory features from Akdağ (2022) IFAC benchmark CSV logs.
+    """
     csv_dir = Path(csv_dir)
     if not csv_dir.exists():
         return {}
@@ -215,180 +194,260 @@ def extract_akdag_data(csv_dir=AKDAG_CSV_DIR, d_safe=300.0, r_max_deg_s=3.0):
         if not (ra_csv.exists() and is_csv.exists()):
             continue
 
-        df_ra = pd.read_csv(ra_csv)
-        df_is = pd.read_csv(is_csv)
-
-        df_ra = df_ra.loc[~((df_ra['ship_2_x'] == 0.0) & (df_ra['ship_2_y'] == 0.0))].copy()
-        df_is = df_is.loc[~((df_is['ship_2_x'] == 0.0) & (df_is['ship_2_y'] == 0.0))].copy()
-
         akdag_data[c] = {}
 
-        # RA
-        dists_ra = np.sqrt((df_ra['ship_1_x'] - df_ra['ship_2_x'])**2 + (df_ra['ship_1_y'] - df_ra['ship_2_y'])**2)
-        r_min_ra = float(np.min(dists_ra)) if len(dists_ra) > 0 else np.nan
-        dt_ra = np.diff(df_ra['time'].to_numpy())
-        dt_ra[dt_ra == 0] = 1.0
-        r_yaw_ra = np.rad2deg(np.diff(np.unwrap(df_ra['ship_1_psi'].to_numpy())) / dt_ra)
-        peak_rate_ra = float(np.max(np.abs(r_yaw_ra))) if len(r_yaw_ra) > 0 else 0.0
-        risk_ra = compute_safety_risk_factors(
-            min_dist=r_min_ra, rudder_or_rate=peak_rate_ra, d_safe=d_safe,
-            d_max=3.0 * d_safe, eps_tol=0.02 * d_safe, max_rudder_rate_deg_s=r_max_deg_s,
-            w_dist=0.6, w_steer=0.4
-        )
-        akdag_data[c]["RA"] = {"r_min": r_min_ra, "peak_rate": peak_rate_ra, "risk": risk_ra}
+        for mode, fpath in [("RA", ra_csv), ("IS", is_csv)]:
+            df = pd.read_csv(fpath)
+            # Remove zero padding / stationary rows
+            df = df.loc[~((df['ship_1_x'] == 0.0) & (df['ship_1_y'] == 0.0))].copy()
+            if df.empty:
+                continue
 
-        # IS
-        dists_is = np.sqrt((df_is['ship_1_x'] - df_is['ship_2_x'])**2 + (df_is['ship_1_y'] - df_is['ship_2_y'])**2)
-        r_min_is = float(np.min(dists_is)) if len(dists_is) > 0 else np.nan
-        dt_is = np.diff(df_is['time'].to_numpy())
-        dt_is[dt_is == 0] = 1.0
-        r_yaw_is = np.rad2deg(np.diff(np.unwrap(df_is['ship_1_psi'].to_numpy())) / dt_is)
-        peak_rate_is = float(np.max(np.abs(r_yaw_is))) if len(r_yaw_is) > 0 else 0.0
-        risk_is = compute_safety_risk_factors(
-            min_dist=r_min_is, rudder_or_rate=peak_rate_is, d_safe=d_safe,
-            d_max=3.0 * d_safe, eps_tol=0.02 * d_safe, max_rudder_rate_deg_s=r_max_deg_s,
-            w_dist=0.6, w_steer=0.4
-        )
-        akdag_data[c]["IS"] = {"r_min": r_min_is, "peak_rate": peak_rate_is, "risk": risk_is}
+            # 1. Minimum Separation Distance
+            dists = np.sqrt((df['ship_1_x'] - df['ship_2_x'])**2 + (df['ship_1_y'] - df['ship_2_y'])**2)
+            r_min = float(np.min(dists)) if len(dists) > 0 else np.nan
+
+            # 2. Heading Deviation & Initial Turn Side
+            psi = np.unwrap(df['ship_1_psi'].to_numpy())
+            d_chi = np.rad2deg(psi - psi[0])
+            peak_dchi = float(np.max(np.abs(d_chi)))
+
+            turn_idx = np.where(np.abs(d_chi) > 1.0)[0]
+            if len(turn_idx) > 0:
+                turn_side = "S" if d_chi[turn_idx[0]] > 0 else "P"
+            else:
+                y_dev = df['ship_1_y'].to_numpy() - df['ship_1_y'].iloc[0]
+                lat_idx = np.where(np.abs(y_dev) > 2.0)[0]
+                turn_side = ("S" if y_dev[lat_idx[0]] > 0 else "P") if len(lat_idx) > 0 else "None"
+
+            # 3. Dimensionless Yaw Rate r' = (r * L) / u
+            t = df['time'].to_numpy()
+            dt = np.diff(t)
+            dt[dt == 0] = 1.0
+            r_rad_s = np.diff(psi) / dt
+            r_prime = np.abs(r_rad_s) * L_akdag / u_nominal
+            peak_r_prime = float(np.max(r_prime)) if len(r_prime) > 0 else 0.0
+
+            # 4. Dimensionless Lateral Deviation ey / L
+            ey = np.abs(df['ship_1_y'].to_numpy() - df['ship_1_y'].iloc[0])
+            peak_ey_L = float(np.max(ey) / L_akdag)
+
+            akdag_data[c][mode] = {
+                "initial_turn": turn_side,
+                "r_min": r_min,
+                "d_safe": float(d_safe),
+                "r_min_ratio": r_min / float(d_safe),
+                "peak_dchi": peak_dchi,
+                "peak_r_prime": peak_r_prime,
+                "peak_ey_L": peak_ey_L,
+            }
 
     return akdag_data
 
 
-def run_dynamic_batch(model_data):
-    """Generates the safety assessment plot for Own Thesis Model."""
-    rows = []
-    for sc, modes in model_data.items():
-        if "RA" in modes and "IS" in modes:
-            rows.append({
-                "scenario": sc.upper(),
-                "R_safety_RA": modes["RA"]["risk"],
-                "R_safety_IS": modes["IS"]["risk"],
-            })
+def generate_protocol_tables(model_data, akdag_data):
+    """
+    Constructs, displays, and exports Table A (Qualitative Signature)
+    and Table B (Scale-Free Relative Effects).
+    """
+    out_dir = REPO_ROOT / "results_plots"
+    os.makedirs(out_dir, exist_ok=True)
 
-    if not rows:
-        return
+    all_cases = sorted(list(set(list(model_data.keys()) + list(akdag_data.keys()))))
+    cases = [c for c in all_cases if "case" in c]
 
-    df = pd.DataFrame(rows).sort_values(by="scenario")
-    plot_safety_assessment_chart(
-        df,
-        title_suffix="(Own Thesis Model)",
-        filename="thesis_model_safety_assessment.png"
-    )
+    # =========================================================================
+    # TABLE A: QUALITATIVE SIGNATURE VALIDATION MATRIX
+    # =========================================================================
+    rows_a = []
+    latex_rows_a = []
 
+    for c in cases:
+        m = model_data.get(c, {})
+        a = akdag_data.get(c, {})
 
-def run_akdag_batch(akdag_data):
-    """Generates the safety assessment plot for Akdağ IFAC Benchmark."""
-    rows = []
-    for sc, modes in akdag_data.items():
-        if "RA" in modes and "IS" in modes:
-            rows.append({
-                "scenario": sc.upper(),
-                "R_safety_RA": modes["RA"]["risk"],
-                "R_safety_IS": modes["IS"]["risk"],
-            })
+        m_ra, m_is = m.get("RA", {}), m.get("IS", {})
+        a_ra, a_is = a.get("RA", {}), a.get("IS", {})
 
-    if not rows:
-        return
+        # 1. Turn Sides
+        a_turn_ra = a_ra.get("initial_turn", "-")
+        m_turn_ra = m_ra.get("initial_turn", "-")
+        a_turn_is = a_is.get("initial_turn", "-")
+        m_turn_is = m_is.get("initial_turn", "-")
 
-    df = pd.DataFrame(rows).sort_values(by="scenario")
-    plot_safety_assessment_chart(
-        df,
-        title_suffix="(Akdağ IFAC Benchmark)",
-        filename="akdag_benchmark_safety_assessment.png"
-    )
+        # 2. Magnitude Reduction: |chi|_IS < |chi|_RA
+        a_mag = ("PASS" if a_is.get("peak_dchi", 0.0) < a_ra.get("peak_dchi", 1.0) else "FAIL") if (a_is and a_ra) else "-"
+        m_mag = ("PASS" if m_is.get("peak_dchi", 0.0) < m_ra.get("peak_dchi", 1.0) else "FAIL") if (m_is and m_ra) else "-"
 
+        # 3. Safety Clearance: CPA_IS >= d_safe
+        a_cpa = ("PASS" if a_is.get("r_min_ratio", 0.0) >= 0.98 else "FAIL") if a_is else "-"
+        m_cpa = ("PASS" if m_is.get("r_min_ratio", 0.0) >= 0.98 else "FAIL") if m_is else "-"
 
-def generate_comparison_table(
-    model_data,
-    akdag_data,
-    d_safe_thesis=1.0,
-    d_safe_akdag=300.0,
-    r_max_thesis_deg=90.0,
-    r_max_akdag_deg=3.0
-):
-    all_scenarios = sorted(list(set(list(model_data.keys()) + list(akdag_data.keys()))))
-    rows = []
+        # Qualitative Agreement Scoring
+        match_turn = (a_turn_ra == m_turn_ra) and (a_turn_is == m_turn_is) and (a_turn_ra != "-")
+        match_mag = (a_mag == m_mag) and (a_mag != "-")
+        match_cpa = (a_cpa == m_cpa) and (a_cpa != "-")
+        overall = "AGREE" if (match_turn and match_mag and match_cpa) else ("PARTIAL" if (match_turn or match_mag) else "DIVERGE")
 
-    for sc in all_scenarios:
-        for mode in ["RA", "IS"]:
-            m_info = model_data.get(sc, {}).get(mode, {})
-            a_info = akdag_data.get(sc, {}).get(mode, {})
+        rows_a.append({
+            "Case": c.upper(),
+            "Turn RA (Akd)": a_turn_ra,
+            "Turn RA (Sur)": m_turn_ra,
+            "Turn IS (Akd)": a_turn_is,
+            "Turn IS (Sur)": m_turn_is,
+            "|χ|_IS < |χ|_RA (Akd)": a_mag,
+            "|χ|_IS < |χ|_RA (Sur)": m_mag,
+            "CPA >= d_safe (Akd)": a_cpa,
+            "CPA >= d_safe (Sur)": m_cpa,
+            "Verdict": overall
+        })
 
-            # 1. Non-dimensional Clearance Ratio (r_min / d_safe)
-            if "r_min" in m_info and not np.isnan(m_info["r_min"]):
-                m_ratio = m_info["r_min"] / d_safe_thesis
-                m_clr_str = f"{m_ratio:.2f} ({m_info['r_min']:.2f}m)"
-            else:
-                m_clr_str = "-"
+        def to_latex_mark(val):
+            if val == "PASS": return r"\checkmark"
+            if val == "FAIL": return r"$\times$"
+            return val
 
-            if "r_min" in a_info and not np.isnan(a_info["r_min"]):
-                a_ratio = a_info["r_min"] / d_safe_akdag
-                a_clr_str = f"{a_ratio:.2f} ({a_info['r_min']:.1f}m)"
-            else:
-                a_clr_str = "-"
+        latex_rows_a.append(
+            f"{c.upper()} & {a_turn_ra} & {m_turn_ra} & {a_turn_is} & {m_turn_is} & "
+            f"{to_latex_mark(a_mag)} & {to_latex_mark(m_mag)} & "
+            f"{to_latex_mark(a_cpa)} & {to_latex_mark(m_cpa)} & {overall} \\\\"
+        )
 
-            # 2. Peak Steering Utilization (% of actuator limit + raw deg/s)
-            if "peak_rate" in m_info and not np.isnan(m_info["peak_rate"]):
-                m_util = (m_info["peak_rate"] / r_max_thesis_deg) * 100.0
-                m_rate_str = f"{m_util:.1f}% ({m_info['peak_rate']:.1f}°/s)"
-            else:
-                m_rate_str = "-"
-
-            if "peak_rate" in a_info and not np.isnan(a_info["peak_rate"]):
-                a_util = (a_info["peak_rate"] / r_max_akdag_deg) * 100.0
-                a_rate_str = f"{a_util:.1f}% ({a_info['peak_rate']:.2f}°/s)"
-            else:
-                a_rate_str = "-"
-
-            # 3. Combined Risk Safety Factor
-            m_risk = f"{m_info['risk']:.3f}" if ("risk" in m_info and not np.isnan(m_info["risk"])) else "-"
-            a_risk = f"{a_info['risk']:.3f}" if ("risk" in a_info and not np.isnan(a_info["risk"])) else "-"
-
-            rows.append({
-                "Scenario": sc.upper(),
-                "Mode": mode,
-                "r_min/d_safe (Thesis)": m_clr_str,
-                "r_min/d_safe (Akdağ)": a_clr_str,
-                "Peak Turn % (Thesis)": m_rate_str,
-                "Peak Turn % (Akdağ)": a_rate_str,
-                "Risk SF (Thesis)": m_risk,
-                "Risk SF (Akdağ)": a_risk,
-            })
-
-    df_comp = pd.DataFrame(rows)
+    df_a = pd.DataFrame(rows_a)
 
     print("\n" + "=" * 115)
-    print("                     QUALITATIVE & QUANTITATIVE BENCHMARK: THESIS MODEL vs. AKDAĞ BENCHMARK")
+    print("                    PROTOCOL A: QUALITATIVE SIGNATURE VALIDATION MATRIX")
     print("=" * 115)
-    print(df_comp.to_string(index=False))
+    print(df_a.to_string(index=False))
     print("=" * 115 + "\n")
 
-    os.makedirs(REPO_ROOT / "results_plots", exist_ok=True)
-    out_csv = REPO_ROOT / "results_plots" / "thesis_vs_akdag_detailed_comparison.csv"
-    df_comp.to_csv(out_csv, index=False)
-    print(f"[SUCCESS] Exported detailed comparison table to: {out_csv}")
+    df_a.to_csv(out_dir / "protocol_a_signature_validation.csv", index=False)
+
+    # Export Table A LaTeX
+    tex_a = r"""\begin{table}[htbp]
+\centering
+\small
+\caption{Protocol A: Qualitative Signature Validation Matrix comparing the discrete surrogate SB-MPC against the continuous benchmark by Akda\u{g} (2022).}
+\label{tab:protocol_a_signature}
+\begin{tabular*}{\textwidth}{@{\extracolsep{\fill}} l c c c c c c c c c @{}}
+\toprule
+\multirow{2}{*}{\textbf{Case}} & \multicolumn{2}{c}{\textbf{Turn Side (RA)}} & \multicolumn{2}{c}{\textbf{Turn Side (IS)}} & \multicolumn{2}{c}{\textbf{$|\chi|_{\text{IS}} < |\chi|_{\text{RA}}$}} & \multicolumn{2}{c}{\textbf{$\text{CPA}_{\text{IS}} \ge d_{\text{safe}}$}} & \multirow{2}{*}{\textbf{Verdict}} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7} \cmidrule(lr){8-9}
+& \textbf{Akda\u{g}} & \textbf{Surrogate} & \textbf{Akda\u{g}} & \textbf{Surrogate} & \textbf{Akda\u{g}} & \textbf{Surrogate} & \textbf{Akda\u{g}} & \textbf{Surrogate} & \\
+\midrule
+""" + "\n".join(latex_rows_a) + r"""
+\bottomrule
+\end{tabular*}
+\begin{tablenotes}
+    \footnotesize
+    \item \textit{Note:} Turn directions are designated Port (P) or Starboard (S). Checks (\checkmark) denote satisfied boundary conditions.
+\end{tablenotes}
+\end{table}
+"""
+    with open(out_dir / "protocol_a_signature.tex", "w") as f:
+        f.write(tex_a)
+
+    # =========================================================================
+    # TABLE B: SCALE-FREE RELATIVE EFFECTS (IS / RA RATIOS)
+    # =========================================================================
+    rows_b = []
+    latex_rows_b = []
+
+    for c in cases:
+        m = model_data.get(c, {})
+        a = akdag_data.get(c, {})
+
+        m_ra, m_is = m.get("RA", {}), m.get("IS", {})
+        a_ra, a_is = a.get("RA", {}), a.get("IS", {})
+
+        def safe_ratio(num_dict, den_dict, key):
+            if key in num_dict and key in den_dict and den_dict[key] > 1e-4:
+                return num_dict[key] / den_dict[key]
+            return np.nan
+
+        # 1. Peak Heading Ratio
+        a_r_dchi = safe_ratio(a_is, a_ra, "peak_dchi")
+        m_r_dchi = safe_ratio(m_is, m_ra, "peak_dchi")
+
+        # 2. Peak Dimensionless Yaw Rate Ratio
+        a_r_rprime = safe_ratio(a_is, a_ra, "peak_r_prime")
+        m_r_rprime = safe_ratio(m_is, m_ra, "peak_r_prime")
+
+        # 3. Peak Lateral Displacement / L Ratio
+        a_r_ey = safe_ratio(a_is, a_ra, "peak_ey_L")
+        m_r_ey = safe_ratio(m_is, m_ra, "peak_ey_L")
+
+        # 4. Normalized Safety Margin Ratio (r_min / d_safe)
+        a_r_margin = safe_ratio(a_is, a_ra, "r_min_ratio")
+        m_r_margin = safe_ratio(m_is, m_ra, "r_min_ratio")
+
+        def fmt(v):
+            return f"{v:.2f}" if not np.isnan(v) else "-"
+
+        rows_b.append({
+            "Case": c.upper(),
+            "|Δχ| Ratio (Akd)": fmt(a_r_dchi),
+            "|Δχ| Ratio (Sur)": fmt(m_r_dchi),
+            "r' Ratio (Akd)": fmt(a_r_rprime),
+            "r' Ratio (Sur)": fmt(m_r_rprime),
+            "ey/L Ratio (Akd)": fmt(a_r_ey),
+            "ey/L Ratio (Sur)": fmt(m_r_ey),
+            "Margin Ratio (Akd)": fmt(a_r_margin),
+            "Margin Ratio (Sur)": fmt(m_r_margin),
+        })
+
+        latex_rows_b.append(
+            f"{c.upper()} & {fmt(a_r_dchi)} & {fmt(m_r_dchi)} & {fmt(a_r_rprime)} & {fmt(m_r_rprime)} & "
+            f"{fmt(a_r_ey)} & {fmt(m_r_ey)} & {fmt(a_r_margin)} & {fmt(m_r_margin)} \\\\"
+        )
+
+    df_b = pd.DataFrame(rows_b)
+
+    print("\n" + "=" * 115)
+    print("                    PROTOCOL B: SCALE-FREE RELATIVE EFFECTS (IS / RA RATIOS)")
+    print("=" * 115)
+    print(df_b.to_string(index=False))
+    print("=" * 115 + "\n")
+
+    df_b.to_csv(out_dir / "protocol_b_relative_effects.csv", index=False)
+
+    # Export Table B LaTeX
+    tex_b = r"""\begin{table}[htbp]
+\centering
+\small
+\caption{Protocol B: Scale-Free Relative Effect Ratios ($\text{IS}/\text{RA}$) evaluating internal model sensitivity and structural agreement between models.}
+\label{tab:protocol_b_relative_ratios}
+\begin{tabular*}{\textwidth}{@{\extracolsep{\fill}} l c c c c c c c c @{}}
+\toprule
+\multirow{2}{*}{\textbf{Case}} & \multicolumn{2}{c}{\textbf{Peak $|\Delta\chi|$ Ratio}} & \multicolumn{2}{c}{\textbf{Peak $|r'|$ Ratio}} & \multicolumn{2}{c}{\textbf{Peak $|e_y/L|$ Ratio}} & \multicolumn{2}{c}{\textbf{Margin ($R_{\min}/d_{\text{safe}}$) Ratio}} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7} \cmidrule(lr){8-9}
+& \textbf{Akda\u{g}} & \textbf{Surrogate} & \textbf{Akda\u{g}} & \textbf{Surrogate} & \textbf{Akda\u{g}} & \textbf{Surrogate} & \textbf{Akda\u{g}} & \textbf{Surrogate} \\
+\midrule
+""" + "\n".join(latex_rows_b) + r"""
+\bottomrule
+\end{tabular*}
+\begin{tablenotes}
+    \footnotesize
+    \item \textit{Note:} Relative effects are evaluated within each model as $\text{Metric}_{\text{IS}} / \text{Metric}_{\text{RA}}$. Ratios $< 1.0$ indicate performance reductions (smoother maneuvers or smaller fairway excursions) enabled by Intent-Sharing.
+\end{tablenotes}
+\end{table}
+"""
+    with open(out_dir / "protocol_b_relative_effects.tex", "w") as f:
+        f.write(tex_b)
+
+    print(f"[SUCCESS] Exported Protocol A & B tables to: {out_dir}")
 
 
 if __name__ == "__main__":
-    d_safe_thesis = 1.0
+    d_safe_thesis = VesselParams.DCPA_safe
     d_safe_akdag = 300.0
-    r_max_thesis = 90.0
-    r_max_akdag = 3.0
+    L_thesis = VesselParams.L
+    L_akdag = 110.0
 
     # 1. Parse both datasets
-    model_data = extract_model_data(d_safe=d_safe_thesis)
-    akdag_data = extract_akdag_data(d_safe=d_safe_akdag, r_max_deg_s=r_max_akdag)
+    model_data = extract_model_data(d_safe=d_safe_thesis, L_os=L_thesis)
+    akdag_data = extract_akdag_data(d_safe=d_safe_akdag, L_akdag=L_akdag, u_nominal=5.0)
 
-    # 2. Generate side-by-side Safety Factor bar charts
-    run_dynamic_batch(model_data)
-    run_akdag_batch(akdag_data)
+    # 2. Protocol Validation Tables A & B
+    generate_protocol_tables(model_data, akdag_data)
 
-    # 3. Print and export the detailed comparison table
-    generate_comparison_table(
-        model_data,
-        akdag_data,
-        d_safe_thesis=d_safe_thesis,
-        d_safe_akdag=d_safe_akdag,
-        r_max_thesis_deg=r_max_thesis,
-        r_max_akdag_deg=r_max_akdag
-    )

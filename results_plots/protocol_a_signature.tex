@@ -1,0 +1,25 @@
+\begin{table}[htbp]
+\centering
+\small
+\caption{Protocol A: Qualitative Signature Validation Matrix comparing the discrete surrogate SB-MPC against the continuous benchmark by Akda\u{g} (2022).}
+\label{tab:protocol_a_signature}
+\begin{tabular*}{\textwidth}{@{\extracolsep{\fill}} l c c c c c c c c c @{}}
+\toprule
+\multirow{2}{*}{\textbf{Case}} & \multicolumn{2}{c}{\textbf{Turn Side (RA)}} & \multicolumn{2}{c}{\textbf{Turn Side (IS)}} & \multicolumn{2}{c}{\textbf{$|\chi|_{\text{IS}} < |\chi|_{\text{RA}}$}} & \multicolumn{2}{c}{\textbf{$\text{CPA}_{\text{IS}} \ge d_{\text{safe}}$}} & \multirow{2}{*}{\textbf{Verdict}} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7} \cmidrule(lr){8-9}
+& \textbf{Akda\u{g}} & \textbf{Surrogate} & \textbf{Akda\u{g}} & \textbf{Surrogate} & \textbf{Akda\u{g}} & \textbf{Surrogate} & \textbf{Akda\u{g}} & \textbf{Surrogate} & \\
+\midrule
+CASE01 & P & S & P & S & \checkmark & \checkmark & \checkmark & \checkmark & PARTIAL \\
+CASE02 & P & S & P & P & \checkmark & $\times$ & \checkmark & \checkmark & DIVERGE \\
+CASE03 & P & S & P & None & \checkmark & \checkmark & \checkmark & \checkmark & PARTIAL \\
+CASE04 & S & P & S & P & $\times$ & $\times$ & \checkmark & \checkmark & PARTIAL \\
+CASE05 & P & S & P & S & $\times$ & $\times$ & \checkmark & \checkmark & PARTIAL \\
+CASE06 & P & P & P & P & \checkmark & \checkmark & \checkmark & \checkmark & AGREE \\
+CASE07 & - & P & - & P & - & \checkmark & - & \checkmark & DIVERGE \\
+\bottomrule
+\end{tabular*}
+\begin{tablenotes}
+    \footnotesize
+    \item \textit{Note:} Turn directions are designated Port (P) or Starboard (S). Checks (\checkmark) denote satisfied boundary conditions.
+\end{tablenotes}
+\end{table}
