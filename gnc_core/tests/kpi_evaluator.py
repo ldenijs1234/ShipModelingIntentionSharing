@@ -1,31 +1,33 @@
+"""
+kpi_evaluator.py
+Implements the standardized two-tier Key Performance Indicator (KPI) framework:
+  - Tier 1: Standalone Safety Assessment (R_dist, R_steer, S, Risk Class)
+  - Tier 2: Efficiency and Total Assessment (E_speed, E_route, E, Percentage Improvement I)
+"""
+
+from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 
 def compute_asm_telecom_kpis(num_waypoints: int, configured_interval: float) -> dict:
     """
     Computes exact bit length, payload bytes, ITU slot occupancy,
-    and regulatory compliance according to the ASM schema (Figure 2.1)
-    and ITU-R M.1371-6 Table 56.
+    and regulatory compliance according to the ASM schema and ITU-R M.1371-6.
     """
-    # Schema supports up to 7 route waypoints (max 8 entries total)
     n_wp = int(np.clip(num_waypoints, 0, 7))
 
-    # 1. Header bit definitions
-    bits_standard_frame = 6 + 2 + 30 + 2       # 40 bits (Msg 8 header)
-    bits_app_header = 16 + 3 + 2 + 17 + 3      # 41 bits (IAI through Num_WP)
+    bits_standard_frame = 6 + 2 + 30 + 2  # 40 bits (Msg 8 header)
+    bits_app_header = 16 + 3 + 2 + 17 + 3  # 41 bits (IAI through Num_WP)
 
-    # 2. Waypoint bit definitions
     if n_wp == 0:
         total_bits = bits_standard_frame + bits_app_header
     else:
-        bits_wp1 = 27 + 26 + 9 + 10            # 72 bits (Absolute WGS-84 anchor)
-        bits_subsequent = (n_wp - 1) * (12 + 12 + 9 + 10)  # 53 bits each (Delta)
+        bits_wp1 = 27 + 26 + 9 + 10  # 72 bits
+        bits_subsequent = (n_wp - 1) * (12 + 12 + 9 + 10)  # 53 bits each
         total_bits = bits_standard_frame + bits_app_header + bits_wp1 + bits_subsequent
 
-    # Binary data payload evaluated against ITU Table 56 excludes the 40-bit frame
     payload_bytes = int(np.ceil((total_bits - bits_standard_frame) / 8.0))
 
-    # 3. Required ITU TDMA slots (ITU-R M.1371-6 Table 56)
     if payload_bytes <= 12:
         slots = 1
     elif payload_bytes <= 40:
@@ -35,10 +37,11 @@ def compute_asm_telecom_kpis(num_waypoints: int, configured_interval: float) -> 
     else:
         slots = int(np.ceil(payload_bytes / 28.0))
 
-    # 4. Regulatory checks (20 slots/min RATDMA mobile station limit)
     min_compliant_interval = (slots * 3.0) / np.sqrt(30)
     configured_interval_full = configured_interval * np.sqrt(30)
-    actual_slots_per_min = (slots * 60.0) / configured_interval_full if configured_interval_full > 0.0 else 0.0
+    actual_slots_per_min = (
+        (slots * 60.0) / configured_interval_full if configured_interval_full > 0.0 else 0.0
+    )
     is_vdl_compliant = (actual_slots_per_min <= 20.0) and (slots <= 3)
 
     return {
@@ -51,60 +54,63 @@ def compute_asm_telecom_kpis(num_waypoints: int, configured_interval: float) -> 
         "asm_compliant": is_vdl_compliant,
     }
 
+
 def resolve_effective_interval(
     input_interval: float, num_waypoints: int
 ) -> tuple[float, float]:
-    """Clamps the input broadcast interval to the ITU-R M.1371-6 RATDMA minimum threshold.
-
-    Returns:
-        effective_interval: max(input_interval, min_compliant_interval)
-        min_compliant_interval: ITU-R M.1371-6 limit (slots * 3.0s)
-    """
     telecom = compute_asm_telecom_kpis(
         num_waypoints=num_waypoints, configured_interval=input_interval
     )
     min_compliant = telecom["asm_min_interval_s"]
     effective_interval = max(float(input_interval), float(min_compliant))
-
     return effective_interval, min_compliant
 
 
 class ScenarioKPIEvaluator:
+    """
+    Standardized Two-Tier KPI Evaluator for Inland Waterway Collision Avoidance.
+    """
 
     def __init__(
         self,
-        d_safe: float,
-        nominal_waypoints: np.ndarray,
-        w_cte: float = 1/3,
-        w_ctrl: float = 1/3,
-        w_speed: float = 1/3,
+        d_safe: float = 1.0,
+        eps_d: float = 0.02,
+        d_far_factor: float = 3.0,
+        r_cap: float = 0.50,  # rad/s (~28.6 deg/s maximum achievable steady-state yaw rate)
+        nominal_waypoints: Optional[np.ndarray] = None,
         u_nominal: float = 0.45,
+        w_v: float = 0.30,
+        w_c: float = 0.70,
+        omega: float = 0.50,
+        delta_deadband: float = 5.0,  # % percentage point deadband
+        s_floor: float = 0.10,
+        e_floor: float = 0.05,
     ):
-        """
-        Evaluates safety, control effort, mission deviation, and speed degradation.
-        """
-        self.d_safe = d_safe
+        self.d_safe = float(d_safe)
+        self.eps_d = float(eps_d)
+        self.d_far = float(d_far_factor * d_safe)
+        self.r_cap = float(r_cap)
         self.nominal_wps = nominal_waypoints
+        self.u_nominal = float(u_nominal)
 
-        # Normalize weights so they sum to 1.0
-        total_w = w_cte + w_ctrl + w_speed
-        self.w_cte = w_cte / total_w
-        self.w_ctrl = w_ctrl / total_w
-        self.w_speed = w_speed / total_w
+        # Baseline efficiency weights (sum to 1.0)
+        tot_w = w_v + w_c
+        self.w_v = w_v / tot_w
+        self.w_c = w_c / tot_w
 
-        self.u_nominal = u_nominal
-
-    def calculate_cte(
-        self, x: np.ndarray, y: np.ndarray, wp_a: np.ndarray, wp_b: np.ndarray
-    ) -> np.ndarray:
-        """Computes signed cross-track error using orthogonal leg projection."""
-        dx = wp_b[0] - wp_a[0]
-        dy = wp_b[1] - wp_a[1]
-        alpha_k = np.arctan2(dy, dx)
-        return -(x - wp_a[0]) * np.sin(alpha_k) + (y - wp_a[1]) * np.cos(alpha_k)
+        self.omega = float(omega)
+        self.delta_deadband = float(delta_deadband)
+        self.s_floor = float(s_floor)
+        self.e_floor = float(e_floor)
 
     def calculate_multi_segment_cte(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
-        """Computes true perpendicular CTE across a multi-waypoint polyline."""
+        """
+        Computes true perpendicular cross-track error across a multi-waypoint polyline
+        using clamped orthogonal segment projection (Equation 3.29).
+        """
+        if self.nominal_wps is None or len(self.nominal_wps) < 2:
+            return np.zeros(len(x))
+
         pts = np.column_stack([x, y])
         n_pts = len(pts)
         ctes = np.zeros(n_pts)
@@ -120,59 +126,11 @@ class ScenarioKPIEvaluator:
             v = p - seg_starts
             t = np.sum(v * seg_vecs, axis=1) / np.maximum(seg_lens_sq, 1e-6)
             t_clamped = np.clip(t, 0.0, 1.0)
-
             projs = seg_starts + t_clamped[:, np.newaxis] * seg_vecs
             dists = np.linalg.norm(p - projs, axis=1)
             ctes[i] = np.min(dists)
 
         return ctes
-
-    def compute_safety_risk_factors(
-        min_dist: float,
-        rudder_history: np.ndarray,
-        time_history: np.ndarray,
-        d_safe: float = 1.0,
-        d_max: float = 2.8,
-        max_rudder_rate_deg_s: float = 90.0,
-        w_dist: float = 0.5,
-        w_steer: float = 0.5,
-    ) -> tuple[float, float, float]:
-        """
-        Computes normalized risk factors in [0, 1] for distance and steering change.
-        """
-        # 1. Distance Risk Factor (R_dist)
-        if min_dist < (d_safe - 0.01):
-            r_dist = float('inf')  # Domain breach
-        elif min_dist >= d_max:
-            r_dist = 0.0
-        else:
-            # Exponential / cubic decay from 1.0 down to 0.0
-            p_dist = 3.0
-            r_dist = float(((d_max - min_dist) / (d_max - d_safe)) ** p_dist)
-
-        # 2. Dynamic Maneuver Risk Factor (R_steer)
-        if len(rudder_history) > 1 and len(time_history) > 1:
-            dt = np.diff(time_history)
-            d_rudder = np.diff(rudder_history)
-            valid_dt = np.where(dt > 1e-4, dt, 1e-4)
-            raw_rates = np.abs(d_rudder / valid_dt)  # deg/s
-
-            # Apply a short rolling window (e.g., 3-5 samples) or 95th percentile
-            # to filter out single-timestep numerical differentiation artifacts
-            filtered_peak = float(np.percentile(raw_rates, 98))
-        else:
-            filtered_peak = 0.0
-
-        # Quadratic scaling against the 90 deg/s theoretical threshold
-        r_steer = float(min(1.0, (filtered_peak / max_rudder_rate_deg_s) ** 2.0))
-
-        # 3. Composite Safety Risk
-        if r_dist == float("inf"):
-            r_safety = float("inf")
-        else:
-            r_safety = float(w_dist * r_dist + w_steer * r_steer)
-
-        return r_dist, filtered_peak, r_steer, r_safety
 
     def evaluate_single_run(
         self,
@@ -181,122 +139,169 @@ class ScenarioKPIEvaluator:
         os_psi: np.ndarray,
         os_r: np.ndarray,
         ts_pos: np.ndarray,
-        os_u: np.ndarray = None,
+        os_u: Optional[np.ndarray] = None,
         num_waypoints: int = 0,
         configured_interval: float = 0.0,
+        t_w: Optional[float] = None,
     ) -> dict:
-        """Evaluates raw metrics and telecom footprint for a single simulation run."""
-        # 0. Sanitize duplicate timestamps to prevent gradient divide-by-zero
-        t_clean, unique_indices = np.unique(t, return_index=True)
-        os_pos = os_pos[unique_indices]
-        os_psi = os_psi[unique_indices]
-        os_r = os_r[unique_indices]
-        ts_pos = ts_pos[unique_indices]
+        """
+        Evaluates Tier 1 Safety and Tier 2 Efficiency KPIs for a single run over [t_0, t_w].
+        """
+        # 1. Sanitize timestamps
+        t_clean, unique_idx = np.unique(t, return_index=True)
         t = t_clean
+        os_pos = os_pos[unique_idx]
+        os_psi = os_psi[unique_idx]
+        os_r = os_r[unique_idx]
+        ts_pos = ts_pos[unique_idx]
 
-        # Infer surge speed u(t) from coordinate displacement if not directly supplied
-        if os_u is None:
+        if os_u is not None:
+            os_u = os_u[unique_idx]
+        else:
             if len(t) > 1:
                 vx = np.gradient(os_pos[:, 0], t)
                 vy = np.gradient(os_pos[:, 1], t)
                 os_u = np.hypot(vx, vy)
             else:
                 os_u = np.full_like(t, self.u_nominal)
-        else:
-            os_u = os_u[unique_indices]
+
+        # 2. Slice to the common evaluation window [t_0, t_w]
+        if t_w is not None:
+            mask = t <= (t_w + 1e-4)
+            if np.any(mask):
+                t = t[mask]
+                os_pos = os_pos[mask]
+                os_psi = os_psi[mask]
+                os_r = os_r[mask]
+                ts_pos = ts_pos[mask]
+                os_u = os_u[mask]
 
         trapz_fn = getattr(np, "trapezoid", getattr(np, "trapz", None))
         duration = max(t[-1] - t[0], 1.0)
 
-        # 1. Safety Constraint: Range R(t)
+        # -------------------------------------------------------------
+        # TIER 1: SAFETY ASSESSMENT
+        # -------------------------------------------------------------
         ranges = np.linalg.norm(ts_pos - os_pos, axis=1)
-        r_min = float(np.min(ranges))
-        breached = r_min < (self.d_safe - 0.01)
-        j_safe = np.inf if breached else 0.0
+        d_min = float(np.min(ranges)) if len(ranges) > 0 else float("inf")
 
-        # 2. Control Effort: Integral of squared yaw acceleration r_dot^2
-        if len(t) > 1:
-            r_dot = np.gradient(os_r, t)
-            j_ctrl = float(trapz_fn(r_dot**2, t)) / duration
+        # Breach condition with numerical tolerance
+        breached = bool(d_min < (self.d_safe - self.eps_d))
+        b_flag = 1 if breached else 0
+
+        # Linear Distance Risk Factor R_dist in [0, 1]
+        r_dist = float(np.clip((self.d_far - d_min) / (self.d_far - self.d_safe), 0.0, 1.0))
+
+        # Steering Risk Factor R_steer in [0, 1]
+        os_r_rad = os_r if np.nanmax(np.abs(os_r)) < 3.0 else np.deg2rad(os_r)
+        r_pk = float(np.nanmax(np.abs(os_r_rad))) if len(os_r_rad) > 0 else 0.0
+        r_steer = float(np.clip(r_pk / max(self.r_cap, 1e-3), 0.0, 1.0))
+
+        # Composite Safety Index S = max(R_dist, R_steer)
+        s_index = float(max(r_dist, r_steer))
+
+        if breached:
+            risk_class = "Breach"
+        elif s_index < 0.35:
+            risk_class = "Low Risk"
+        elif s_index < 0.70:
+            risk_class = "Moderate Risk"
         else:
-            j_ctrl = 0.0
+            risk_class = "High Risk"
 
-        # 3. Mission Tracking: Multi-segment Cross-Track Error
-        e_cte = self.calculate_multi_segment_cte(os_pos[:, 0], os_pos[:, 1])
-        j_cte = float(trapz_fn(np.abs(e_cte), t)) / duration if len(t) > 1 else 0.0
-
-        # 4. Speed Degradation Penalty: Normalized deviation from u_nominal
+        # -------------------------------------------------------------
+        # TIER 2: EFFICIENCY ASSESSMENT
+        # -------------------------------------------------------------
+        # Speed Degradation Index E_speed
         if len(t) > 1:
-            speed_loss = np.clip(1.0 - (os_u / max(self.u_nominal, 1e-3)), 0.0, 1.0)
-            j_speed = float(trapz_fn(speed_loss**2, t)) / duration
+            speed_ratio = np.clip(os_u / max(self.u_nominal, 0.05), 0.0, 1.0)
+            e_speed = float(trapz_fn((1.0 - speed_ratio) ** 2, t)) / duration
         else:
-            j_speed = 0.0
+            e_speed = 0.0
+        e_speed = float(np.clip(e_speed, 0.0, 1.0))
 
-        # 5. Telecom Footprint & VDL Loading
-        telecom_metrics = compute_asm_telecom_kpis(
-            num_waypoints=num_waypoints,
-            configured_interval=configured_interval,
+        # Route Deviation Index E_route
+        if len(t) > 1:
+            ctes = self.calculate_multi_segment_cte(os_pos[:, 0], os_pos[:, 1])
+            mean_cte = float(trapz_fn(ctes, t)) / duration
+            e_route = float(np.clip(mean_cte / max(self.d_far, 1e-3), 0.0, 1.0))
+        else:
+            e_route = 0.0
+
+        # Efficiency Index E across baseline weights and sensitivity pairs
+        e_index = float(self.w_v * e_speed + self.w_c * e_route)
+        e_50_50 = float(0.50 * e_speed + 0.50 * e_route)
+        e_40_60 = float(0.40 * e_speed + 0.60 * e_route)
+
+        telecom = compute_asm_telecom_kpis(
+            num_waypoints=num_waypoints, configured_interval=configured_interval
         )
 
         metrics = {
-            "r_min": r_min,
+            "d_min": d_min,
             "breached": breached,
-            "j_safe": j_safe,
-            "j_ctrl": j_ctrl,
-            "j_cte": j_cte,
-            "j_speed": j_speed,
+            "b_flag": b_flag,
+            "r_dist": r_dist,
+            "r_pk_rad_s": r_pk,
+            "r_pk_deg_s": float(np.rad2deg(r_pk)),
+            "r_steer": r_steer,
+            "s_index": s_index,
+            "risk_class": risk_class,
+            "e_speed": e_speed,
+            "e_route": e_route,
+            "e_index": e_index,
+            "e_50_50": e_50_50,
+            "e_40_60": e_40_60,
         }
-        metrics.update(telecom_metrics)
+        metrics.update(telecom)
         return metrics
 
     def evaluate_comparison(self, raw_ra: dict, raw_is: dict) -> dict:
-        """Computes relative baseline normalization and composite delta J."""
-        if raw_is["breached"]:
-            res = {
-                "status": "IS_BREACH",
-                "j_total_is": np.inf,
-                "delta_j": np.inf,
-                "delta_j_pct": -np.inf,
-            }
-            # Carry over IS telecom KPIs into comparison output
-            for k in raw_is:
-                if k.startswith("asm_"):
-                    res[k] = raw_is[k]
-            return res
+        """
+        Computes percentage improvements (I_S, I_E, I_total) and classifies the run
+        according to the updated Table 4.5 rules.
+        """
+        b_ra = raw_ra["b_flag"]
+        b_is = raw_is["b_flag"]
 
-        if raw_ra["breached"] and not raw_is["breached"]:
-            res = {
-                "status": "SAFETY_ENHANCEMENT",
-                "j_total_is": 0.0,
-                "delta_j": -np.inf,
-                "delta_j_pct": 100.0,
-            }
-            for k in raw_is:
-                if k.startswith("asm_"):
-                    res[k] = raw_is[k]
-            return res
+        s_ra, s_is = raw_ra["s_index"], raw_is["s_index"]
+        e_ra, e_is = raw_ra["e_index"], raw_is["e_index"]
 
-        # Normalize metrics against RA baseline
-        norm_ctrl = raw_is["j_ctrl"] / max(raw_ra["j_ctrl"], 1e-6)
-        norm_cte = raw_is["j_cte"] / max(raw_ra["j_cte"], 1e-6)
-        norm_speed = raw_is["j_speed"] / max(raw_ra["j_speed"], 1e-6)
-        
-        j_total_is = (
-            self.w_ctrl * norm_ctrl
-            + self.w_cte * norm_cte
-            + self.w_speed * norm_speed
-        )
-        delta_j = j_total_is - 1.0
-        delta_j_pct = (1.0 - j_total_is) * 100.0
+        # Percentage Improvements bounded in [-100%, +100%]
+        i_s = 100.0 * float(np.clip((s_ra - s_is) / max(s_ra, self.s_floor), -1.0, 1.0))
+        i_e = 100.0 * float(np.clip((e_ra - e_is) / max(e_ra, self.e_floor), -1.0, 1.0))
+
+        # Total Improvement
+        i_total = float(self.omega * i_s + (1.0 - self.omega) * i_e)
+
+        # -------------------------------------------------------------
+        # OUTCOME CLASSIFICATION (Table 4.5 Revised Rules)
+        # -------------------------------------------------------------
+        delta = self.delta_deadband
+        if b_is == 1 and b_ra == 0:
+            outcome = "Loss of Improvement"
+        elif b_ra == 1 and b_is == 0:
+            outcome = "Improvement"
+        elif b_is == 1 and b_ra == 1:
+            outcome = "Loss of Improvement"
+        elif i_total > delta:
+            outcome = "Improvement"
+        elif i_total < -delta:
+            outcome = "Loss of Improvement"
+        else:
+            outcome = "Same / Inconclusive"
 
         res = {
-            "status": "SAFE_COMPARISON",
-            "norm_ctrl": norm_ctrl,
-            "norm_cte": norm_cte,
-            "norm_speed": norm_speed,
-            "j_total_is": j_total_is,
-            "delta_j": delta_j,
-            "delta_j_pct": delta_j_pct,
+            "b_ra": b_ra,
+            "b_is": b_is,
+            "s_ra": s_ra,
+            "s_is": s_is,
+            "e_ra": e_ra,
+            "e_is": e_is,
+            "i_s": i_s,
+            "i_e": i_e,
+            "i_total": i_total,
+            "outcome": outcome,
         }
         for k in raw_is:
             if k.startswith("asm_"):

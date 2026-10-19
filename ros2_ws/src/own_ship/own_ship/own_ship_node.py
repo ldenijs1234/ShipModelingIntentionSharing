@@ -608,7 +608,7 @@ class OSTransceiverNode(Node):
             if self.sim_mode == "IS"
             else f"{scenario_name}_RA"
         )
-        
+
         # Target folder: ros2_ws/results_plots
         output_dir = os.path.join(str(parent_repo), "ros2_ws", "results_plots")
         os.makedirs(output_dir, exist_ok=True)
@@ -653,17 +653,17 @@ class OSTransceiverNode(Node):
         plt.close(fig1)
 
         # ----------------------------------------------------------------------
-        # Figure 2: 2D Spatial Trajectory & Evasion Route
+        # Figure 2: 2D Spatial Trajectory & Evasion Route (Dynamic & Both Banks)
         # ----------------------------------------------------------------------
-        fig2, ax2 = plt.subplots(figsize=(10, 8))
+        fig2, ax2 = plt.subplots(figsize=(6, 9), dpi=300)
         fig2.canvas.manager.set_window_title("2D Spatial Trajectory Analysis")
 
-        # 1. Canal Banks (Rendered with filled beige polygons matching plot_headless_run)
         from matplotlib.patches import Polygon as MplPolygon
         bank_edge_color = '#8c564b'
         bank_face_color = '#ebdcb9'
         bank_labeled = False
 
+        # 1. Draw Canal Banks
         polys = []
         if self.canal_polygons is not None:
             raw_poly = self.canal_polygons
@@ -687,68 +687,128 @@ class OSTransceiverNode(Node):
                     closed=True,
                     facecolor=bank_face_color,
                     edgecolor=bank_edge_color,
-                    linewidth=1.8,
-                    alpha=0.65,
+                    linewidth=1.4,
+                    alpha=0.75,
                     zorder=1,
                     label="Canal Bank" if not bank_labeled else None
                 )
                 ax2.add_patch(patch)
                 bank_labeled = True
+
         elif self.canal_bounds is not None:
             y_min = self.canal_bounds.get('y_min', -4.0)
             y_max = self.canal_bounds.get('y_max', 4.0)
-            x_min = self.canal_bounds.get('x_min', -10.0)
-            x_max = self.canal_bounds.get('x_max', 50.0)
-            
-            port_coords = np.array([[-15.0, x_min], [y_min, x_min], [y_min, x_max], [-15.0, x_max]])
+            x_min = -200.0
+            x_max = 200.0
+
+            port_coords = np.array([[-200.0, x_min], [y_min, x_min], [y_min, x_max], [-200.0, x_max]])
             ax2.add_patch(MplPolygon(port_coords, closed=True, facecolor=bank_face_color,
-                                    edgecolor=bank_edge_color, linewidth=1.8, alpha=0.65, zorder=1, label="Canal Bank"))
-            stbd_coords = np.array([[y_max, x_min], [15.0, x_min], [15.0, x_max], [y_max, x_max]])
+                                     edgecolor=bank_edge_color, linewidth=1.4, alpha=0.75, zorder=1, label="Canal Bank"))
+            stbd_coords = np.array([[y_max, x_min], [200.0, x_min], [200.0, x_max], [y_max, x_max]])
             ax2.add_patch(MplPolygon(stbd_coords, closed=True, facecolor=bank_face_color,
-                                    edgecolor=bank_edge_color, linewidth=1.8, alpha=0.65, zorder=1))
+                                     edgecolor=bank_edge_color, linewidth=1.4, alpha=0.75, zorder=1))
 
         # 2. Planned routes (East = y, North = x)
         if len(nom_wps) > 0:
-            ax2.plot(nom_wps[:, 1], nom_wps[:, 0], 'k--', alpha=0.5, label='Original Mission')
-            ax2.scatter(nom_wps[:, 1], nom_wps[:, 0], c='black', s=20, alpha=0.5)
+            ax2.plot(nom_wps[:, 1], nom_wps[:, 0], 'k--', alpha=0.45, linewidth=1.2, label='Original Mission')
 
         if evasive_wps.size > 0:
-            ax2.plot(evasive_wps[:, 1], evasive_wps[:, 0], color='tab:blue', linestyle='--',
-                     marker='o', markersize=4, label='Latched Evasive Route')
+            ax2.plot(evasive_wps[:, 1], evasive_wps[:, 0], color='tab:cyan', linestyle='--',
+                     marker='o', markersize=3.5, linewidth=1.2, label='Latched Evasive Route')
 
         # 3. Actual sailed tracks
-        ax2.plot(os_pos[:, 1], os_pos[:, 0], color='tab:blue', linewidth=2.2, label='OS Track')
-        ax2.plot(ts_pos[:, 1], ts_pos[:, 0], color='tab:red', linewidth=2.2, label='TS Track')
+        ax2.plot(os_pos[:, 1], os_pos[:, 0], color='#1f77b4', linewidth=2.2, label='OS Track', zorder=3)
+        ax2.plot(ts_pos[:, 1], ts_pos[:, 0], color='#d62728', linewidth=2.2, label='TS Track', zorder=3)
 
-        # Start and terminal markers
-        ax2.scatter(os_pos[0, 1], os_pos[0, 0], color='tab:blue', s=60, marker='o', label='OS Start')
-        ax2.scatter(os_pos[-1, 1], os_pos[-1, 0], color='tab:blue', s=80, marker='x', label='OS End')
-        ax2.scatter(ts_pos[0, 1], ts_pos[0, 0], color='tab:red', s=60, marker='o', label='TS Start')
-        ax2.scatter(ts_pos[-1, 1], ts_pos[-1, 0], color='tab:red', s=80, marker='x', label='TS End')
+        # Start and Terminal Markers
+        ax2.scatter(os_pos[0, 1], os_pos[0, 0], color='#1f77b4', s=45, marker='o', zorder=4)
+        ax2.plot(os_pos[-1, 1], os_pos[-1, 0], 'o', color='#1f77b4', mfc='none', markersize=8, markeredgewidth=1.8, label='OS End', zorder=4)
 
-        # Closest Point of Approach marker
+        ax2.scatter(ts_pos[0, 1], ts_pos[0, 0], color='#d62728', s=45, marker='o', zorder=4)
+        ax2.plot(ts_pos[-1, 1], ts_pos[-1, 0], 'o', color='#d62728', mfc='none', markersize=8, markeredgewidth=1.8, label='TS End', zorder=4)
+
+        # Closest Point of Approach (CPA)
         dists = np.hypot(os_pos[:, 0] - ts_pos[:, 0], os_pos[:, 1] - ts_pos[:, 1])
         min_idx = int(np.argmin(dists))
-        ax2.scatter(os_pos[min_idx, 1], os_pos[min_idx, 0], color='darkorange', s=90, marker='*', zorder=5)
-        ax2.scatter(ts_pos[min_idx, 1], ts_pos[min_idx, 0], color='darkorange', s=90, marker='*', zorder=5)
+        ax2.scatter(os_pos[min_idx, 1], os_pos[min_idx, 0], color='darkorange', s=85, marker='*', zorder=5)
+        ax2.scatter(ts_pos[min_idx, 1], ts_pos[min_idx, 0], color='darkorange', s=85, marker='*', zorder=5)
         ax2.plot([os_pos[min_idx, 1], ts_pos[min_idx, 1]],
                  [os_pos[min_idx, 0], ts_pos[min_idx, 0]],
-                 'k:', linewidth=1.5, label=f'CPA: {dists[min_idx]:.2f} m @ {t_arr[min_idx]:.1f} s')
+                 'k:', linewidth=1.4, label=f'CPA: {dists[min_idx]:.2f} m @ {t_arr[min_idx]:.1f} s', zorder=5)
+
+        # ----------------------------------------------------------------------
+        # 4. Vertical Limits (Full Trajectory & Waypoint Coverage)
+        # ----------------------------------------------------------------------
+        pts_north = [os_pos[:, 0], ts_pos[:, 0]]
+        pts_east = [os_pos[:, 1], ts_pos[:, 1]]
+        if len(nom_wps) > 0:
+            pts_north.append(nom_wps[:, 0])
+            pts_east.append(nom_wps[:, 1])
+        if evasive_wps.size > 0:
+            pts_north.append(evasive_wps[:, 0])
+            pts_east.append(evasive_wps[:, 1])
+
+        all_north = np.concatenate(pts_north)
+        all_east = np.concatenate(pts_east)
+
+        n_min, n_max = float(np.min(all_north)), float(np.max(all_north))
+        n_pad = max(2.5, 0.05 * (n_max - n_min))
+        y_bottom = n_min - n_pad
+        y_top = n_max + n_pad
+        ax2.set_ylim(y_bottom, y_top)
+
+        # ----------------------------------------------------------------------
+        # 5. Horizontal Limits (Guaranteed Visibility of Both Canal Banks)
+        # ----------------------------------------------------------------------
+        port_inners = []
+        stbd_inners = []
+
+        # A. Detect edge segments passing through the active vertical window
+        if polys:
+            for poly in polys:
+                x_pts, y_pts = poly.exterior.xy  # x = North, y = East
+                n_pts = len(x_pts)
+                for i in range(n_pts - 1):
+                    x1, x2 = x_pts[i], x_pts[i + 1]
+                    y1, y2 = y_pts[i], y_pts[i + 1]
+                    # Check if this edge spans into [y_bottom, y_top]
+                    if max(x1, x2) >= y_bottom and min(x1, x2) <= y_top:
+                        y_mid = 0.5 * (y1 + y2)
+                        if y_mid < 0:
+                            port_inners.append(max(y1, y2))
+                        else:
+                            stbd_inners.append(min(y1, y2))
+
+        # B. Fallback to scenario canal bounds metadata
+        if self.canal_bounds is not None:
+            if 'y_min' in self.canal_bounds:
+                port_inners.append(float(self.canal_bounds['y_min']))
+            if 'y_max' in self.canal_bounds:
+                stbd_inners.append(float(self.canal_bounds['y_max']))
+
+        # C. Resolve innermost shoreline on each side (closest to channel centerline y=0)
+        port_inner = max(port_inners) if port_inners else min(-4.0, float(np.min(all_east)) - 1.5)
+        stbd_inner = min(stbd_inners) if stbd_inners else max(4.0, float(np.max(all_east)) + 1.5)
+
+        # D. Add a 1.5 m glimpse margin beyond the inner shoreline
+        glimpse_width = 1.5
+        x_left = min(float(np.min(all_east)) - 1.0, port_inner - glimpse_width)
+        x_right = max(float(np.max(all_east)) + 1.0, stbd_inner + glimpse_width)
+        ax2.set_xlim(x_left, x_right)
 
         title_str = f"Run Trajectory: {scenario_name} ({self.sim_mode})"
         if self.sim_mode == "IS":
             title_str += f" | $\\tau$={self.sim_latency:.1f}s, $\\Delta T$={self.sim_interval:.1f}s"
-        ax2.set_title(title_str, fontsize=12, fontweight='bold', pad=10)
+        ax2.set_title(title_str, fontsize=11, fontweight='bold', pad=10)
 
         ax2.set_xlabel("East (y) [m]")
         ax2.set_ylabel("North (x) [m]")
-        ax2.grid(True, linestyle="--", alpha=0.5)
-        ax2.axis("equal")
-        ax2.legend(loc="lower left", framealpha=0.9)
+        ax2.grid(True, linestyle="-", alpha=0.5)
+        ax2.legend(loc="lower left", fontsize=8.0, framealpha=0.92)
 
         fig2.tight_layout()
         spatial_png = os.path.join(output_dir, f"{tag}_trajectory.png")
-        fig2.savefig(spatial_png, dpi=300)
+        fig2.savefig(spatial_png, dpi=300, bbox_inches='tight')
         plt.close(fig2)
 
         self.get_logger().info(f"[Plotter] Saved figures: {metrics_png} and {spatial_png}")

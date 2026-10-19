@@ -1,3 +1,13 @@
+#!/usr/bin/env python3
+"""
+batch_runner.py
+Executes batch evaluation over simulation logs using the two-tier KPI framework:
+  1. Computes standardized evaluation window T = [t_0, t_w] per scenario.
+  2. Evaluates Tier 1 Safety and Tier 2 Efficiency KPIs.
+  3. Formulates percentage improvement curves I(tau) and identifies tipping latencies.
+  4. Generates two-panel publication plots.
+"""
+
 import glob
 import os
 from pathlib import Path
@@ -12,53 +22,27 @@ from gnc_core.tests.kpi_evaluator import ScenarioKPIEvaluator
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-def compute_safety_risk_factors(
-    min_dist: float,
-    rudder_history: np.ndarray,
-    time_history: np.ndarray,
-    d_safe: float = 1.0,
-    d_max: float = 2.8,
-    eps_tol: float = 0.05,
-    max_rudder_rate_deg_s: float = 90.0,
-    w_dist: float = 0.5,
-    w_steer: float = 0.5,
-):
+def find_cutoff_time(run_data: dict, nominal_wps: np.ndarray, d_slow: float = 2.0) -> float:
     """
-    Computes normalized risk factors in [0, 1] for proximity and steering change.
+    Finds the time Own Ship enters the terminal deceleration zone (d_slow)
+    around the final mission waypoint.
     """
-    effective_d_safe = d_safe - eps_tol  # 0.95m tolerance for tracking variance
-
-    # 1. Proximity Risk Factor (R_dist)
-    if min_dist < effective_d_safe:
-        r_dist = float("inf")
-    elif min_dist >= d_max:
-        r_dist = 0.0
-    else:
-        # Exponential cubic decay: r_dist -> 1.0 near d_safe, 0.0 at d_max
-        r_dist = float(((d_max - min_dist) / (d_max - effective_d_safe)) ** 3.0)
-
-    # 2. Dynamic Maneuver Risk Factor (R_steer)
-    if len(rudder_history) > 1 and len(time_history) > 1:
-        dt = np.diff(time_history)
-        d_rudder = np.diff(rudder_history)
-        valid_dt = np.where(dt > 1e-4, dt, 1e-4)
-        rudder_rates = np.abs(d_rudder / valid_dt)  # deg/s
-        peak_rate = float(np.max(rudder_rates))
-    else:
-        peak_rate = 0.0
-
-    r_steer = float(min(1.0, (peak_rate / max_rudder_rate_deg_s) ** 2.0))
-
-    # 3. Composite Safety Risk (R_safety)
-    if r_dist == float("inf"):
-        r_safety = float("inf")
-    else:
-        r_safety = float(w_dist * r_dist + w_steer * r_steer)
-
-    return r_dist, peak_rate, r_steer, r_safety
+    t = run_data["t"]
+    os_pos = run_data["os_pos"]
+    w_final = nominal_wps[-1, :2]
+    dists = np.linalg.norm(os_pos - w_final, axis=1)
+    slow_idx = np.where(dists <= d_slow)[0]
+    if len(slow_idx) > 0:
+        return float(t[slow_idx[0]])
+    return float(t[-1])
 
 
 def plot_combined_assessment_curve(df_scenario: pd.DataFrame, scenario_name: str):
+    """
+    Plots the standardized two-panel assessment:
+      - Top: Tier 1 Standalone Safety Index S in [0, 1] with risk zones.
+      - Bottom: Tier 2 Total Percentage Improvement I [%] relative to RA baseline.
+    """
     fig, (ax_safe, ax_eff) = plt.subplots(2, 1, figsize=(10.5, 9.5), dpi=100, sharex=True)
 
     df = df_scenario.copy()
@@ -72,74 +56,46 @@ def plot_combined_assessment_curve(df_scenario: pd.DataFrame, scenario_name: str
     max_tau = float(np.nanmax(df["latency"].to_numpy()))
 
     # =========================================================================
-    # SUBFIGURE 1: Safety Assessment (Top) - Absolute Risk Scale [0, 1]
+    # SUBFIGURE 1: Safety Assessment (Top) - Absolute Scale S in [0, 1]
     # =========================================================================
-    y_safe_breach_ceiling = 1.08  # Elevation above 1.0 for breached markers/lines
+    y_safe_breach_ceiling = 1.08
 
-    # Qualitative zones below 1.0
-    ax_safe.axhspan(0.0, 0.35, color="#f0fdf4", alpha=0.45, zorder=1)
-    ax_safe.axhspan(0.35, 0.70, color="#fef9c3", alpha=0.45, zorder=1)
-    ax_safe.axhspan(0.70, 1.00, color="#fee2e2", alpha=0.45, zorder=1)
-
-    # 1. Dark-red diagonal striped hatch region for the Breach Zone (> 1.0)
+    # Qualitative zones
+    ax_safe.axhspan(0.0, 0.35, color="#f0fdf4", alpha=0.55, zorder=1)
+    ax_safe.axhspan(0.35, 0.70, color="#fef9c3", alpha=0.55, zorder=1)
+    ax_safe.axhspan(0.70, 1.00, color="#fee2e2", alpha=0.55, zorder=1)
     ax_safe.axhspan(
-        1.00,
-        1.18,
-        facecolor="#7f1d1d",
-        edgecolor="#991b1b",
-        alpha=0.35,
-        hatch="//",
-        linewidth=0.8,
-        zorder=1,
+        1.00, 1.18, facecolor="#7f1d1d", edgecolor="#991b1b",
+        alpha=0.35, hatch="//", linewidth=0.8, zorder=1
     )
 
-    # Text annotations for the regions
-    ax_safe.text(0.1, 0.15, "LOW RISK", fontsize=8.0, fontweight="bold", color="#166534", alpha=0.75)
-    ax_safe.text(0.1, 0.50, "MODERATE RISK", fontsize=8.0, fontweight="bold", color="#854d0e", alpha=0.75)
-    ax_safe.text(0.1, 0.85, "HIGH RISK", fontsize=8.0, fontweight="bold", color="#991b1b", alpha=0.75)
-    ax_safe.text(
-        0.1,
-        1.09,
-        "BREACH",
-        fontsize=8.5,
-        fontweight="bold",
-        color="#7f1d1d",
-        alpha=0.90,
-    )
+    ax_safe.text(0.1, 0.15, "LOW RISK (S < 0.35)", fontsize=8.0, fontweight="bold", color="#166534", alpha=0.85)
+    ax_safe.text(0.1, 0.50, "MODERATE RISK (0.35 ≤ S < 0.70)", fontsize=8.0, fontweight="bold", color="#854d0e", alpha=0.85)
+    ax_safe.text(0.1, 0.85, "HIGH RISK (S ≥ 0.70)", fontsize=8.0, fontweight="bold", color="#991b1b", alpha=0.85)
+    ax_safe.text(0.1, 1.09, "HARD BREACH (d_min < 0.98 m)", fontsize=8.5, fontweight="bold", color="#7f1d1d", alpha=0.95)
 
-    # Hard boundary line at R = 1.0
     ax_safe.axhline(1.0, color="#991b1b", linestyle=":", linewidth=1.2, alpha=0.85, zorder=2)
 
-    # 2. Check and Plot RA Baseline (Handles finite and inf values)
-    ra_r_safety = df["ra_r_safety"].iloc[0] if "ra_r_safety" in df.columns else float("inf")
-
-    if not np.isfinite(ra_r_safety):
-        # Baseline is breached: display inside the striped zone at y = 1.08
+    # RA Baseline line
+    ra_s = df["ra_s"].iloc[0]
+    ra_breached = bool(df["ra_breached"].iloc[0])
+    if ra_breached:
         ax_safe.axhline(
-            y_safe_breach_ceiling,
-            color="#1f2937",
-            linestyle="--",
-            linewidth=1.4,
-            label=r"RA Baseline ($\infty$ - BREACH)",
-            zorder=3,
+            y_safe_breach_ceiling, color="#1f2937", linestyle="--", linewidth=1.4,
+            label=r"RA Baseline ($\mathrm{BREACH}$)", zorder=3
         )
     else:
-        # Standard finite baseline
         ax_safe.axhline(
-            ra_r_safety,
-            color="#1f2937",
-            linestyle="--",
-            linewidth=1.3,
-            label=rf"RA Baseline ($R_{{\mathrm{{safety}}}} = {ra_r_safety:.2f}$)",
-            zorder=3,
+            ra_s, color="#1f2937", linestyle="--", linewidth=1.3,
+            label=rf"RA Baseline ($S = {ra_s:.2f}$)", zorder=3
         )
 
-    # 3. Plot IS Data Points and Breaches
+    # Plot IS points
     for dt_val, group in df.groupby("interval_round"):
         sorted_group = group.sort_values(by="latency")
         tau = sorted_group["latency"].to_numpy()
-        r_safety = sorted_group["r_safety"].to_numpy()
-        breached = (sorted_group["r_min"] < 0.95).to_numpy() | ~np.isfinite(r_safety)
+        s_val = sorted_group["is_s"].to_numpy()
+        breached = sorted_group["is_breached"].to_numpy()
         color = color_map[dt_val]
 
         safe_idx = np.where(~breached)[0]
@@ -148,77 +104,52 @@ def plot_combined_assessment_curve(df_scenario: pd.DataFrame, scenario_name: str
             for i, seg in enumerate(segments):
                 if len(seg) > 0:
                     ax_safe.plot(
-                        tau[seg],
-                        r_safety[seg],
-                        marker="s",
-                        color=color,
-                        linewidth=1.6,
-                        markersize=4.5,
+                        tau[seg], s_val[seg], marker="s", color=color,
+                        linewidth=1.6, markersize=4.5,
                         label=rf"$\Delta T_{{\mathrm{{IS}}}} = {dt_val:.1f}\,$s" if i == 0 else None,
                         zorder=4,
                     )
 
         if np.any(breached):
             ax_safe.scatter(
-                tau[breached],
-                np.full(np.sum(breached), y_safe_breach_ceiling),
-                color=color,
-                marker="X",
-                s=75,
-                edgecolor="black",
-                linewidth=0.7,
-                zorder=5,
+                tau[breached], np.full(np.sum(breached), y_safe_breach_ceiling),
+                color=color, marker="X", s=75, edgecolor="black", linewidth=0.7, zorder=5
             )
-            for t_b in tau[breached]:
-                ax_safe.vlines(
-                    t_b,
-                    0.0,
-                    y_safe_breach_ceiling,
-                    color=color,
-                    linestyle=":",
-                    linewidth=0.9,
-                    alpha=0.65,
-                    zorder=2,
-                )
 
     ax_safe.set_title(
-        f"Safety Assessment ({scenario_name.upper()}): Proximity & Rudder Rate Risk",
-        fontsize=11,
-        fontweight="bold",
-        pad=8,
+        f"Tier 1: Standalone Safety Assessment ({scenario_name.upper()})",
+        fontsize=11, fontweight="bold", pad=8
     )
-    ax_safe.set_ylabel(r"Safety Risk Factor $R_{\mathrm{safety}}$", fontsize=9.5)
+    ax_safe.set_ylabel(r"Safety Index $S = \max(R_{\mathrm{dist}}, R_{\mathrm{steer}})$", fontsize=9.5)
     ax_safe.set_ylim(-0.05, 1.18)
     ax_safe.set_yticks([0.0, 0.2, 0.4, 0.6, 0.8, 1.0])
     ax_safe.grid(True, linestyle=":", alpha=0.55, zorder=0)
     ax_safe.legend(loc="upper left", ncol=2, fontsize=7.5, framealpha=0.92)
 
     # =========================================================================
-    # SUBFIGURE 2: Safety & Efficiency Assessment (Bottom)
+    # SUBFIGURE 2: Safety & Efficiency Assessment (Bottom) - Percentage Scale I
     # =========================================================================
-    y_min, y_max = -1.1, 1.1
-    y_breach_ceiling = 0.55
+    y_min, y_max = -115.0, 105.0
+    y_breach_floor = -105.0
 
-    ax_eff.axhspan(0.0, y_max, color="#fee2e2", alpha=0.5, zorder=1)
-    ax_eff.axhspan(y_min, 0.0, color="#f0fdf4", alpha=0.5, zorder=1)
+    # Qualitative zones
+    ax_eff.axhspan(5.0, y_max, color="#f0fdf4", alpha=0.55, zorder=1)
+    ax_eff.axhspan(-5.0, 5.0, color="#f8fafc", alpha=0.75, zorder=1)
+    ax_eff.axhspan(y_min, -5.0, color="#fee2e2", alpha=0.55, zorder=1)
 
-    ax_eff.text(0.1, 0.04, "IS INFERIOR (Worse than RA)", fontsize=8.0, fontweight="bold", color="#991b1b", alpha=0.75)
-    ax_eff.text(0.1, -0.04, "IS SUPERIOR (Better than RA)", fontsize=8.0, fontweight="bold", color="#166534", alpha=0.75, va="top")
+    ax_eff.text(0.1, 15.0, "IMPROVEMENT (I > +5%)", fontsize=8.0, fontweight="bold", color="#166534", alpha=0.85)
+    ax_eff.text(0.1, 0.0, "PARITY / SAME (|I| ≤ 5%)", fontsize=7.5, fontweight="bold", color="#475569", alpha=0.85, va="center")
+    ax_eff.text(0.1, -15.0, "LOSS OF IMPROVEMENT (I < -5%)", fontsize=8.0, fontweight="bold", color="#991b1b", alpha=0.85, va="top")
 
-    ax_eff.axhline(
-        0.0,
-        color="#1f2937",
-        linestyle="--",
-        linewidth=1.3,
-        label=r"RA Baseline ($\Delta J = 0$)",
-        zorder=2,
-    )
+    ax_eff.axhline(0.0, color="#1f2937", linestyle="--", linewidth=1.3, label=r"RA Baseline ($I = 0\%$)", zorder=2)
+    ax_eff.axhline(5.0, color="#166534", linestyle=":", linewidth=0.9, alpha=0.6, zorder=2)
+    ax_eff.axhline(-5.0, color="#991b1b", linestyle=":", linewidth=0.9, alpha=0.6, zorder=2)
 
     for dt_val, group in df.groupby("interval_round"):
         sorted_group = group.sort_values(by="latency")
         tau = sorted_group["latency"].to_numpy()
-        delta_j = sorted_group["delta_j"].to_numpy()
-        breached = (sorted_group["r_min"] < 0.95).to_numpy() | ~np.isfinite(delta_j)
+        i_total = sorted_group["i_total"].to_numpy()
+        breached = sorted_group["is_breached"].to_numpy()
         color = color_map[dt_val]
 
         safe_indices = np.where(~breached)[0]
@@ -227,65 +158,35 @@ def plot_combined_assessment_curve(df_scenario: pd.DataFrame, scenario_name: str
             for i, seg in enumerate(segments):
                 if len(seg) > 0:
                     ax_eff.plot(
-                        tau[seg],
-                        delta_j[seg],
-                        marker="o",
-                        color=color,
-                        linewidth=1.7,
-                        markersize=4.5,
+                        tau[seg], i_total[seg], marker="o", color=color,
+                        linewidth=1.7, markersize=4.5,
                         label=rf"$\Delta T_{{\mathrm{{IS}}}} = {dt_val:.1f}\,$s" if i == 0 else None,
                         zorder=3,
                     )
 
         if np.any(breached):
             ax_eff.scatter(
-                tau[breached],
-                np.full(np.sum(breached), y_breach_ceiling),
-                color=color,
-                marker="X",
-                s=70,
-                edgecolor="black",
-                linewidth=0.6,
-                zorder=4,
+                tau[breached], np.full(np.sum(breached), y_breach_floor),
+                color=color, marker="X", s=70, edgecolor="black", linewidth=0.6, zorder=4
             )
             for t_b in tau[breached]:
                 ax_eff.vlines(
-                    t_b,
-                    0.0,
-                    y_breach_ceiling,
-                    color=color,
-                    linestyle=":",
-                    linewidth=0.9,
-                    alpha=0.65,
-                    zorder=2,
+                    t_b, y_min, y_breach_floor, color=color,
+                    linestyle=":", linewidth=0.9, alpha=0.65, zorder=2
                 )
 
-        # Dynamic Tipping Line per Interval
-        breach_indices = np.where(breached)[0]
-        if len(breach_indices) > 0:
-            tip_tau = float(tau[breach_indices[0]])
-            ax_eff.axvline(tip_tau, color=color, linestyle="-.", linewidth=1.0, alpha=0.6, zorder=2)
-        else:
-            valid_mask = np.isfinite(delta_j)
-            v_tau = tau[valid_mask]
-            v_dj = delta_j[valid_mask]
-            sign_changes = np.where(np.diff(np.sign(v_dj)) > 0)[0]
-            if len(sign_changes) > 0:
-                idx = sign_changes[0]
-                t0, t1 = v_tau[idx], v_tau[idx + 1]
-                y0, y1 = v_dj[idx], v_dj[idx + 1]
-                if abs(y1 - y0) > 1e-6:
-                    tip_tau = float(t0 + (-y0) * (t1 - t0) / (y1 - y0))
-                    ax_eff.axvline(tip_tau, color=color, linestyle="-.", linewidth=1.0, alpha=0.6, zorder=2)
+        # Dynamic Tipping Line: First latency entering Loss of Improvement (I < -5% or breach)
+        loss_indices = np.where(breached | (i_total < -5.0))[0]
+        if len(loss_indices) > 0:
+            tip_tau = float(tau[loss_indices[0]])
+            ax_eff.axvline(tip_tau, color=color, linestyle="-.", linewidth=1.1, alpha=0.65, zorder=2)
 
     ax_eff.set_title(
-        f"Safety & Efficiency Assessment ({scenario_name.upper()}): Latency Tipping Curve",
-        fontsize=11,
-        fontweight="bold",
-        pad=8,
+        f"Tier 2: Total Performance Assessment ({scenario_name.upper()}): Latency Tipping Curve",
+        fontsize=11, fontweight="bold", pad=8
     )
     ax_eff.set_xlabel(r"Communication Latency $\tau$ [s]", fontsize=10)
-    ax_eff.set_ylabel(r"Performance Differential $\Delta J = J_{\mathrm{IS}} - 1.0$", fontsize=9.5)
+    ax_eff.set_ylabel(r"Total Improvement $I = 0.5\,I_S + 0.5\,I_E$ [\%]", fontsize=9.5)
     ax_eff.set_xlim(-0.3, max_tau + 0.3)
     ax_eff.set_ylim(y_min, y_max)
     ax_eff.set_xticks(np.arange(0, int(max_tau) + 1, 1))
@@ -296,7 +197,8 @@ def plot_combined_assessment_curve(df_scenario: pd.DataFrame, scenario_name: str
     os.makedirs("results_plots", exist_ok=True)
     out_path = f"results_plots/{scenario_name}_combined_assessment.png"
     plt.savefig(out_path, dpi=300)
-    plt.show()
+    plt.close(fig)
+    print(f"[SUCCESS] Saved combined assessment plot to: {out_path}")
 
 
 def run_dynamic_batch(log_dir=None, d_safe=VesselParams.DCPA_safe):
@@ -342,14 +244,25 @@ def run_dynamic_batch(log_dir=None, d_safe=VesselParams.DCPA_safe):
 
         ra_entry = ra_runs[0]
         nominal_wps = ra_entry["data"]["nominal_wps"]
+
+        # 1. Establish common evaluation window T = [t_0, t_w] across the scenario group
+        all_group_runs = ra_runs + is_runs
+        t_cutoffs = [find_cutoff_time(r["data"], nominal_wps, d_slow=2.0) for r in all_group_runs]
+        t_w = float(min(t_cutoffs))
+
         evaluator = ScenarioKPIEvaluator(
             d_safe=d_safe,
+            eps_d=0.02,
+            d_far_factor=3.0,
+            r_cap=0.50,  # steady-state turning capability (rad/s)
             nominal_waypoints=nominal_wps,
-            w_cte=1/3,
-            w_ctrl=1/3,
-            w_speed=1/3,
+            w_v=0.30,
+            w_c=0.70,
+            omega=0.50,
+            delta_deadband=5.0,
         )
 
+        # Evaluate baseline RA
         kpi_ra = evaluator.evaluate_single_run(
             ra_entry["data"]["t"],
             ra_entry["data"]["os_pos"],
@@ -357,16 +270,7 @@ def run_dynamic_batch(log_dir=None, d_safe=VesselParams.DCPA_safe):
             ra_entry["data"]["os_r"],
             ra_entry["data"]["ts_pos"],
             os_u=ra_entry["data"]["os_u"] if "os_u" in ra_entry["data"] else None,
-        )
-
-        # Baseline RA Safety Risk Factors
-        ra_rudder = np.degrees(ra_entry["data"]["os_psi"])
-        ra_r_dist, ra_peak_rate, ra_r_steer, ra_r_safety = compute_safety_risk_factors(
-            kpi_ra["r_min"],
-            ra_rudder,
-            ra_entry["data"]["t"],
-            d_safe=d_safe,
-            max_rudder_rate_deg_s=90.0,
+            t_w=t_w,
         )
 
         sc_results = []
@@ -378,106 +282,116 @@ def run_dynamic_batch(log_dir=None, d_safe=VesselParams.DCPA_safe):
                 is_entry["data"]["os_r"],
                 is_entry["data"]["ts_pos"],
                 os_u=is_entry["data"]["os_u"] if "os_u" in is_entry["data"] else None,
+                num_waypoints=len(is_entry["data"]["evasive_wps"]) if "evasive_wps" in is_entry["data"] else 0,
+                configured_interval=is_entry["interval"],
+                t_w=t_w,
             )
             comp = evaluator.evaluate_comparison(kpi_ra, kpi_is)
-
-            # Safety Risk Factors for IS run
-            is_rudder = np.degrees(is_entry["data"]["os_psi"])
-            r_dist, peak_rate, r_steer, r_safety = compute_safety_risk_factors(
-                kpi_is["r_min"],
-                is_rudder,
-                is_entry["data"]["t"],
-                d_safe=d_safe,
-                max_rudder_rate_deg_s=90.0,
-            )
 
             sc_results.append({
                 "scenario": sc,
                 "interval": is_entry["interval"],
                 "latency": is_entry["latency"],
                 "t_advance": is_entry["t_advance"],
-                "r_min": kpi_is["r_min"],
-                "r_dist": r_dist,
-                "peak_rudder_rate": peak_rate,
-                "r_steer": r_steer,
-                "r_safety": r_safety,
-                "ra_r_safety": ra_r_safety,
-                "status": comp["status"],
-                "norm_ctrl": comp.get("norm_ctrl", float("inf")),
-                "norm_cte": comp.get("norm_cte", float("inf")),
-                "norm_spd": comp.get("norm_speed", float("inf")),
-                "j_total_is": comp.get("j_total_is", float("inf")),
-                "delta_j": comp.get("delta_j", float("inf")),
-                "delta_j_pct": comp.get("delta_j_pct", 0.0),
+                "t_w": t_w,
+                # RA Baseline
+                "ra_breached": kpi_ra["breached"],
+                "ra_dmin": kpi_ra["d_min"],
+                "ra_s": kpi_ra["s_index"],
+                "ra_class": kpi_ra["risk_class"],
+                "ra_e": kpi_ra["e_index"],
+                # IS Run
+                "is_dmin": kpi_is["d_min"],
+                "is_breached": kpi_is["breached"],
+                "is_r_dist": kpi_is["r_dist"],
+                "is_r_pk_deg": kpi_is["r_pk_deg_s"],
+                "is_r_steer": kpi_is["r_steer"],
+                "is_s": kpi_is["s_index"],
+                "is_class": kpi_is["risk_class"],
+                "is_e_spd": kpi_is["e_speed"],
+                "is_e_rte": kpi_is["e_route"],
+                "is_e": kpi_is["e_index"],
+                # Comparative Metrics
+                "i_s": comp["i_s"],
+                "i_e": comp["i_e"],
+                "i_total": comp["i_total"],
+                "outcome": comp["outcome"],
             })
 
         if not sc_results:
-            print(f"[{sc}] No IS runs found to pair with RA baseline.")
             continue
 
         df_sc = pd.DataFrame(sc_results)
         df_sc["latency"] = df_sc["latency"].astype(float)
         df_sc["interval"] = df_sc["interval"].astype(float)
-        df_sc["t_advance"] = df_sc["t_advance"].astype(float)
         df_sc = df_sc.sort_values(by=["interval", "latency"], ascending=[True, True]).reset_index(drop=True)
 
         # ---------------------------------------------------------------------
-        # Table 1: Safety Evaluation
+        # Table 1: Tier 1 Safety Evaluation
         # ---------------------------------------------------------------------
-        print(f"\n================ SAFETY EVALUATION: {sc.upper()} ================")
-        print(f"Baseline RA Reference: r_min={kpi_ra['r_min']:.3f}m | R_dist={ra_r_dist:.3f} | Peak_Rate={ra_peak_rate:.1f}°/s | R_steer={ra_r_steer:.3f} | R_safety={ra_r_safety:.3f}")
+        print(f"\n==================== TIER 1: SAFETY EVALUATION: {sc.upper()} ====================")
+        print(f"Common Window: t in [0.0, {t_w:.1f}s] | d_safe: {d_safe:.2f}m")
+        print(f"Baseline RA: d_min={kpi_ra['d_min']:.3f}m | S={kpi_ra['s_index']:.3f} ({kpi_ra['risk_class']})")
+        print("-" * 105)
         print(
             df_sc[[
-                "scenario",
-                "interval",
-                "latency",
-                "r_min",
-                "r_dist",
-                "peak_rudder_rate",
-                "r_steer",
-                "r_safety",
-                "status",
+                "scenario", "interval", "latency", "is_dmin",
+                "is_r_dist", "is_r_pk_deg", "is_r_steer", "is_s", "is_class"
             ]].to_string(index=False, justify="right", formatters={
                 "interval": "{:.1f}".format,
                 "latency": "{:.1f}".format,
-                "r_min": "{:.3f}".format,
-                "r_dist": lambda x: "BREACH" if not np.isfinite(x) else f"{x:.3f}",
-                "peak_rudder_rate": "{:.1f}".format,
-                "r_steer": "{:.3f}".format,
-                "r_safety": lambda x: "BREACH" if not np.isfinite(x) else f"{x:.3f}",
+                "is_dmin": "{:.3f}".format,
+                "is_r_dist": "{:.3f}".format,
+                "is_r_pk_deg": "{:.1f}°/s".format,
+                "is_r_steer": "{:.3f}".format,
+                "is_s": "{:.3f}".format,
+                "is_class": "{}".format,
             })
         )
 
         # ---------------------------------------------------------------------
-        # Table 2: Safety & Efficiency Evaluation
+        # Table 2: Tier 2 Total Assessment (Safety + Efficiency)
         # ---------------------------------------------------------------------
-        print(f"\n=========== SAFETY AND EFFICIENCY EVALUATION: {sc.upper()} ===========")
+        print(f"\n============= TIER 2: TOTAL PERFORMANCE EVALUATION: {sc.upper()} =============")
+        print(f"Baseline RA: E={kpi_ra['e_index']:.3f} (Speed={kpi_ra['e_speed']:.3f}, Route={kpi_ra['e_route']:.3f})")
+        print("-" * 105)
         print(
             df_sc[[
-                "scenario",
-                "interval",
-                "latency",
-                "t_advance",
-                "r_min",
-                "norm_ctrl",
-                "norm_cte",
-                "norm_spd",
-                "delta_j",
-                "delta_j_pct",
+                "scenario", "interval", "latency", "is_e_spd",
+                "is_e_rte", "is_e", "i_s", "i_e", "i_total", "outcome"
             ]].to_string(index=False, justify="right", formatters={
                 "interval": "{:.1f}".format,
                 "latency": "{:.1f}".format,
-                "t_advance": "{:.2f}".format,
-                "r_min": "{:.3f}".format,
-                "norm_ctrl": "{:.3f}".format,
-                "norm_cte": "{:.3f}".format,
-                "norm_spd": "{:.3f}".format,
-                "delta_j": "{:.4f}".format,
-                "delta_j_pct": "{:+.2f}%".format,
+                "is_e_spd": "{:.3f}".format,
+                "is_e_rte": "{:.3f}".format,
+                "is_e": "{:.3f}".format,
+                "i_s": "{:+.1f}%".format,
+                "i_e": "{:+.1f}%".format,
+                "i_total": "{:+.1f}%".format,
+                "outcome": "{}".format,
             })
         )
 
-        # Plot combined two-panel figure
+        # ---------------------------------------------------------------------
+        # Latency Tipping Point Report
+        # ---------------------------------------------------------------------
+        print(f"\n--- Tipping Latencies for {sc.upper()} ---")
+        for dt_val, group in df_sc.groupby("interval"):
+            sorted_g = group.sort_values(by="latency")
+            taus = sorted_g["latency"].to_numpy()
+            outcomes = sorted_g["outcome"].to_numpy()
+
+            # tau*_imp: largest latency where all prior latencies are Improvement
+            imp_mask = [all(outcomes[: j + 1] == "Improvement") for j in range(len(outcomes))]
+            tau_imp = taus[max(np.where(imp_mask)[0])] if any(imp_mask) else "None"
+
+            # tau*_loss: first latency where outcome is Loss of Improvement
+            loss_idx = np.where(outcomes == "Loss of Improvement")[0]
+            tau_loss = f"{taus[loss_idx[0]]:.1f}s" if len(loss_idx) > 0 else "None"
+
+            print(f"  ΔT_IS = {dt_val:.1f}s -> tau*_imp = {tau_imp if isinstance(tau_imp, str) else f'{tau_imp:.1f}s'}, tau*_loss = {tau_loss}")
+
+        # Render two-panel figure
         if len(df_sc) > 1:
             plot_combined_assessment_curve(df_sc, sc)
 

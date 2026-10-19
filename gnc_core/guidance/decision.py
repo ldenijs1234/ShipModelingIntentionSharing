@@ -35,7 +35,7 @@ class DecisionLayer:
             15.0, 30.0, 45.0, 60.0, 75.0, 90.0,
         ])
     )
-    
+
     p_candidates = np.array([1.0, 0.5, 0.0])
 
     # Tactical lookahead offset candidates relative to TCPA (seconds)
@@ -122,7 +122,7 @@ class DecisionLayer:
         
         if is_reversing:
             # Reversal penalty to suppress S-curve snap-back
-            k_weight = 12.0
+            k_weight = 20.0
         elif d_chi >= 0.0:
             k_weight = cls.k_dchi_stb
         else:
@@ -503,6 +503,7 @@ class DecisionLayer:
 
             for chi in cls.chi_candidates:
                 for p_cand in cls.p_candidates:
+                    cand_wps = None
                     # Nominal track (chi == 0) does not depend on t_offset; evaluate once
                     if abs(chi) < 1e-3 and p_cand > 0.99 and not cls._mode_a_active:
                         if t_off != cls.t_offset_candidates[0]:
@@ -558,19 +559,19 @@ class DecisionLayer:
                             remaining_wps_curved = cls._w_nominal[rejoin_idx_ov:, :2]
 
                             if len(pre_w1_wps) > 0:
-                                full_route = np.vstack([pre_w1_wps, W_1_curved, W_2_curved, W_pass_curved, W_rejoin_curved, remaining_wps_curved])
+                                cand_wps = np.vstack([pre_w1_wps, W_1_curved, W_2_curved, W_pass_curved, W_rejoin_curved, remaining_wps_curved])
                             else:
-                                full_route = np.vstack([W_1_curved, W_2_curved, W_pass_curved, W_rejoin_curved, remaining_wps_curved])
+                                cand_wps = np.vstack([W_1_curved, W_2_curved, W_pass_curved, W_rejoin_curved, remaining_wps_curved])
                         else:
                             if cls._mode_a_active:
                                 # When mid-turn, W_1 is already x_os[:2], so route heads directly to W_2 then rejoins
                                 cand_wps = np.vstack([W_1, W_2, W_3, remaining_wps])
                             else:
                                 if len(pre_w1_wps) > 0:
-                                    full_route = np.vstack([pre_w1_wps, W_1, W_2, W_3, remaining_wps])
+                                    cand_wps = np.vstack([pre_w1_wps, W_1, W_2, W_3, remaining_wps])
                                 else:
-                                    full_route = np.vstack([W_1, W_2, W_3, remaining_wps])
-                                sliced_route = cls._slice_path_forward(full_route, x_os[:2])
+                                    cand_wps = np.vstack([W_1, W_2, W_3, remaining_wps])
+                                sliced_route = cls._slice_path_forward(cand_wps, x_os[:2])
                                 cand_wps = np.vstack([x_os[:2], sliced_route])
 
                     cand_traj, _ = cls._sample_route(cand_wps, x_os[:2], u_os * p_cand, steps, dt_sim)

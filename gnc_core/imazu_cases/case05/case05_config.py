@@ -42,7 +42,7 @@ CASE05_CONFIG = {
     "os_mission_wps": np.array([
         [-26.0, 0.0],
         [  0.0, 0.0],
-        [ 14.0, 2.0]
+        [ 26.0, 0.0]
     ], dtype=np.float64),
     "os_nominal_speed": 0.45,
 
