@@ -76,7 +76,7 @@ class ScenarioKPIEvaluator:
         d_safe: float = 1.0,
         eps_d: float = 0.02,
         d_far_factor: float = 3.0,
-        r_cap: float = 0.50,  # rad/s (~28.6 deg/s maximum achievable steady-state yaw rate)
+        r_cap: float = 1.50,  # rad/s (~86.0 deg/s maximum achievable steady-state yaw rate)
         nominal_waypoints: Optional[np.ndarray] = None,
         u_nominal: float = 0.45,
         w_v: float = 0.30,

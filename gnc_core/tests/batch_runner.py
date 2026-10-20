@@ -254,7 +254,7 @@ def run_dynamic_batch(log_dir=None, d_safe=VesselParams.DCPA_safe):
             d_safe=d_safe,
             eps_d=0.02,
             d_far_factor=3.0,
-            r_cap=0.50,  # steady-state turning capability (rad/s)
+            r_cap=1.50,  # steady-state turning capability (rad/s)
             nominal_waypoints=nominal_wps,
             w_v=0.30,
             w_c=0.70,
@@ -324,6 +324,8 @@ def run_dynamic_batch(log_dir=None, d_safe=VesselParams.DCPA_safe):
         df_sc = pd.DataFrame(sc_results)
         df_sc["latency"] = df_sc["latency"].astype(float)
         df_sc["interval"] = df_sc["interval"].astype(float)
+        ra_tcpa_init = ra_entry["t_advance"]
+        tcpa_header_str = f"{ra_tcpa_init:.1f}s" if not np.isnan(ra_tcpa_init) else "N/A"
         df_sc = df_sc.sort_values(by=["interval", "latency"], ascending=[True, True]).reset_index(drop=True)
 
         # ---------------------------------------------------------------------
@@ -331,15 +333,21 @@ def run_dynamic_batch(log_dir=None, d_safe=VesselParams.DCPA_safe):
         # ---------------------------------------------------------------------
         print(f"\n==================== TIER 1: SAFETY EVALUATION: {sc.upper()} ====================")
         print(f"Common Window: t in [0.0, {t_w:.1f}s] | d_safe: {d_safe:.2f}m")
-        print(f"Baseline RA: d_min={kpi_ra['d_min']:.3f}m | S={kpi_ra['s_index']:.3f} ({kpi_ra['risk_class']})")
+        print(
+            f"Baseline RA: d_min={kpi_ra['d_min']:.3f}m | "
+            f"R_dist={kpi_ra['r_dist']:.3f} | "
+            f"R_steer={kpi_ra['r_steer']:.3f} ({kpi_ra['r_pk_deg_s']:.1f}°/s) | "
+            f"S={kpi_ra['s_index']:.3f} ({kpi_ra['risk_class']})"
+        )
         print("-" * 105)
         print(
             df_sc[[
-                "scenario", "interval", "latency", "is_dmin",
+                "scenario", "interval", "latency", "t_advance", "is_dmin",
                 "is_r_dist", "is_r_pk_deg", "is_r_steer", "is_s", "is_class"
             ]].to_string(index=False, justify="right", formatters={
                 "interval": "{:.1f}".format,
                 "latency": "{:.1f}".format,
+                "t_advance": lambda x: f"{x:.1f}s" if not np.isnan(x) else "N/A",
                 "is_dmin": "{:.3f}".format,
                 "is_r_dist": "{:.3f}".format,
                 "is_r_pk_deg": "{:.1f}°/s".format,
@@ -375,17 +383,15 @@ def run_dynamic_batch(log_dir=None, d_safe=VesselParams.DCPA_safe):
         # ---------------------------------------------------------------------
         # Latency Tipping Point Report
         # ---------------------------------------------------------------------
-        print(f"\n--- Tipping Latencies for {sc.upper()} ---")
+        print(f"\n--- Tipping Latencies for {sc.upper()} (Initial TCPA / t_advance = {tcpa_header_str}) ---")
         for dt_val, group in df_sc.groupby("interval"):
             sorted_g = group.sort_values(by="latency")
             taus = sorted_g["latency"].to_numpy()
             outcomes = sorted_g["outcome"].to_numpy()
 
-            # tau*_imp: largest latency where all prior latencies are Improvement
             imp_mask = [all(outcomes[: j + 1] == "Improvement") for j in range(len(outcomes))]
             tau_imp = taus[max(np.where(imp_mask)[0])] if any(imp_mask) else "None"
 
-            # tau*_loss: first latency where outcome is Loss of Improvement
             loss_idx = np.where(outcomes == "Loss of Improvement")[0]
             tau_loss = f"{taus[loss_idx[0]]:.1f}s" if len(loss_idx) > 0 else "None"
 
