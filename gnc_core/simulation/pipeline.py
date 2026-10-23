@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 from typing import Any, Dict, Optional, Tuple
 import numpy as np
 
@@ -32,25 +33,31 @@ class SynchronousPipeline:
         cached["dcpa"], cached["tcpa"] = RiskCalculator.calculate_cpa(x_os, x_ts, u_nominal)
 
         prev_state = cached.get("state", "State B.2")
-        prev_route_len = len(cached.get("w_active", w_mission_os))
+        prev_w_active = cached.get("w_active", w_mission_os)
 
-        # Unpack the 4 returned values, including the speed multiplier 'p_ca'
+        # Unpack returned values from DecisionLayer
         cached["w_active"], cached["psi_ca"], cached["p_ca"], cached["state"] = DecisionLayer.evaluate(
             x_os, x_ts, w_mission_os, w_ts_delayed, cached["dcpa"], cached["tcpa"], u_nominal, canal_polygons, canal_width
         )
 
-        # Re-anchor downstream waypoint index upon state transitions back to nominal mission
+        # Catch ALL transitions leaving evasion modes back to nominal navigation
         transitioned_from_ca = (
-            (prev_state == "State B.1" and cached["state"] == "State B.2") or
-            (prev_state == "State A.1" and cached["state"] == "State A.2")
+            (prev_state in ["State A.1", "State B.1"] and cached["state"] in ["State A.2", "State B.2"]) or
+            (prev_state == "State A.2" and cached["state"] == "State B.2")
+        )
+
+        # Detect if route length or start point changed
+        route_changed = (
+            len(cached["w_active"]) != len(prev_w_active) or
+            not np.allclose(cached["w_active"][0], prev_w_active[0], atol=1e-3)
         )
 
         if transitioned_from_ca:
-            # Rejoin nearest unsailed segment ahead along the nominal mission
-            best_idx = len(w_mission_os) - 1
-            for idx in range(len(w_mission_os) - 1):
-                seg_vec = w_mission_os[idx + 1, :2] - w_mission_os[idx, :2]
-                v_ship = x_os[:2] - w_mission_os[idx, :2]
+            # Rejoin nearest unsailed segment ahead along the active route
+            best_idx = len(cached["w_active"]) - 1
+            for idx in range(len(cached["w_active"]) - 1):
+                seg_vec = cached["w_active"][idx + 1, :2] - cached["w_active"][idx, :2]
+                v_ship = x_os[:2] - cached["w_active"][idx, :2]
                 seg_len = float(np.hypot(seg_vec[0], seg_vec[1]))
                 proj = float(np.dot(v_ship, seg_vec)) / max(seg_len, 1e-4)
 
@@ -60,23 +67,20 @@ class SynchronousPipeline:
                     break
             cached["wp_idx"] = max(1, best_idx)
             
-        # Reset waypoint index when entering ANY evasion mode or when the route dynamically updates
+        # Reset waypoint index when entering ANY evasion mode or when the route structure updates
         elif (cached["state"] in ["State A.1", "State B.1"] and prev_state not in ["State A.1", "State B.1"]):
             cached["wp_idx"] = 1
-        elif len(cached["w_active"]) != prev_route_len:
+        elif route_changed:
             cached["wp_idx"] = 1
 
-        # 3. Guidance Layer (LOS Waypoint Tracking applies universally now)
+        # 3. Guidance Layer (LOS Waypoint Tracking applies universally)
         cached["psi_wp"], _, cached["wp_idx"] = LOSGuidance.compute_heading_reference(
             x_os, cached["w_active"], cached.get("wp_idx", 1)
         )
 
-        # Removed legacy State B.1 tangent override. 
-        # All modes now smoothly track their active route via LOS.
         psi_guidance_ref = cached["psi_wp"]
 
         # 4. Control Layer (Eq. 3.42: psi_cmd = psi_ref + psi_ca)
-        # Note: psi_ca is now inherently 0.0 from the DecisionLayer for unified geometries
         target_speed = float(u_nominal * cached.get("p_ca", 1.0))
         
         u_c, tau_c, psi_cmd = Autopilot.compute_control(

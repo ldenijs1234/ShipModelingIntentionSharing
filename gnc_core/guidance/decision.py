@@ -43,17 +43,30 @@ class DecisionLayer:
 
     @classmethod
     def _get_active_nominal_track(cls, path_wps: np.ndarray, pos: np.ndarray) -> np.ndarray:
+        """Slices the nominal path to start from the waypoint immediately behind OS."""
         if len(path_wps) < 2:
             return path_wps
-        
-        diffs = np.diff(path_wps[:, :2], axis=0)
-        for i in range(len(path_wps) - 1):
-            seg_dir = diffs[i]
-            v_to_wp = path_wps[i + 1, :2] - pos[:2]
-            if np.dot(seg_dir, v_to_wp) > 0.0: 
-                return path_wps[i:]
-        
-        return path_wps[-2:] if len(path_wps) >= 2 else path_wps
+
+        # 1. Find the waypoint physically closest to OS
+        dists = np.hypot(path_wps[:, 0] - pos[0], path_wps[:, 1] - pos[1])
+        closest_idx = int(np.argmin(dists))
+
+        # 2. Check if OS has passed closest_idx along the leg segment
+        if closest_idx < len(path_wps) - 1:
+            p_curr = path_wps[closest_idx, :2]
+            p_next = path_wps[closest_idx + 1, :2]
+            leg_vec = p_next - p_curr
+            vessel_offset = pos[:2] - p_curr
+
+            # If OS has progressed past p_curr towards p_next, start slice at closest_idx
+            if np.dot(vessel_offset, leg_vec) > 0:
+                start_idx = min(closest_idx, len(path_wps) - 2)
+            else:
+                start_idx = max(0, closest_idx - 1)
+        else:
+            start_idx = max(0, len(path_wps) - 2)
+
+        return path_wps[start_idx:]
 
     @classmethod
     def _slice_path_forward(cls, path_wps: np.ndarray, pos: np.ndarray) -> np.ndarray:

@@ -221,6 +221,7 @@ class OSTransceiverNode(Node):
         self.hist_os_psi = []
         self.hist_os_u = []
         self.hist_ts_pos = []
+        self.hist_ts_psi = []
         self.hist_r = []
         self.hist_os_wps = []
         self.hist_ts_route = []
@@ -450,11 +451,13 @@ class OSTransceiverNode(Node):
         if self.x_ts_est is not None and abs(self.x_ts_est[0]) < 900.0:
             current_range = float(np.linalg.norm(self.internal_state[:2] - self.x_ts_est[:2]))
             ts_pos = self.x_ts_est[:2].copy()
+            ts_psi_val = float(self.x_ts_est[2])
             dcpa_val = telemetry["dcpa"]
             tcpa_val = telemetry["tcpa"]
         else:
             current_range = np.nan
             ts_pos = np.array([np.nan, np.nan])
+            ts_psi_val = np.nan
             dcpa_val = np.nan
             tcpa_val = np.nan
 
@@ -466,6 +469,7 @@ class OSTransceiverNode(Node):
         self.hist_os_psi.append(float(self.internal_state[2]))
         self.hist_os_u.append(float(self.internal_state[5]))
         self.hist_ts_pos.append(ts_pos)
+        self.hist_ts_psi.append(ts_psi_val)
         self.hist_r.append(float(self.internal_state[3]))
 
         # Record active OS route and perceived TS route step histories
@@ -558,6 +562,7 @@ class OSTransceiverNode(Node):
         os_psi = np.array(self.hist_os_psi)
         os_u = np.array(self.hist_os_u)
         ts_pos = np.array(self.hist_ts_pos)
+        ts_psi = np.array(self.hist_ts_psi)
         r_arr = np.array(self.hist_r)
 
         t_adv_val = self.t_advance if self.t_advance is not None else np.nan
@@ -579,6 +584,7 @@ class OSTransceiverNode(Node):
             os_r=r_arr,
             os_u=os_u,
             ts_pos=ts_pos,
+            ts_psi=ts_psi,
             nominal_wps=np.array(self.w_mission_os),
             evasive_wps=w_active_val,
             w_ts_delayed=np.array(self.w_ts_delayed) if self.w_ts_delayed is not None else np.array([]),
