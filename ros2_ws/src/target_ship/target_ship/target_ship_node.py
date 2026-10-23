@@ -213,14 +213,22 @@ class TSSimulatorNode(Node):
         else:
             is_changing_course = False
 
-        sog_knots = float(self.internal_state[5]) * 1.94384
+        # Froude time scale factor (lambda_t = sqrt(30) ≈ 5.4772)
+        time_scale = getattr(self, 'time_scale', np.sqrt(30.0))
 
-        if sog_knots <= 14.0:
-            return 10.0 / 3.0 if is_changing_course else 10.0  # 3 1/3 s vs 10 s
-        elif 14.0 < sog_knots <= 23.0:
-            return 2.0 if is_changing_course else 6.0
+        # 1. Convert simulation speed (m/s) to full-scale SOG in knots for ITU lookup
+        sog_full_knots = float(self.internal_state[5]) * time_scale * 1.94384
+
+        # 2. Determine full-scale ITU-R M.1371 interval (seconds)
+        if sog_full_knots <= 14.0:
+            interval_real = (10.0 / 3.0) if is_changing_course else 10.0  # 3.33 s vs 10 s
+        elif 14.0 < sog_full_knots <= 23.0:
+            interval_real = 2.0 if is_changing_course else 6.0
         else:
-            return 2.0
+            interval_real = 2.0
+
+        # 3. Convert real-world seconds to simulation-world seconds
+        return interval_real / time_scale
 
     def calculate_tcpa(self) -> float:
         if self.os_state is None:

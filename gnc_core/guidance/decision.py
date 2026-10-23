@@ -275,6 +275,7 @@ class DecisionLayer:
             cls._mode_a_active = False
             cls._mode_b_active = False
             cls._w_evasive_latched = None
+            cls._p_evasive_latched = 1.0
             cls._latched_scenario = None
             cls._chi_ca_latched = 0.0
             active_track = cls._get_active_nominal_track(nom, x_os[:2])
@@ -287,6 +288,7 @@ class DecisionLayer:
             cls._mode_a_active = False
             cls._mode_b_active = False
             cls._w_evasive_latched = None
+            cls._p_evasive_latched = 1.0
             cls._latched_scenario = None
             cls._chi_ca_latched = 0.0
             active_track = cls._get_active_nominal_track(nom, x_os[:2])
@@ -355,7 +357,7 @@ class DecisionLayer:
                 return active_track, 0.0, 1.0, f"State {state_prefix}.2"
         else:
             if state_prefix == "A":
-                passed_cpa = (tcpa < -0.5) or (is_astern and curr_dist < 4.0)
+                passed_cpa = (tcpa < -2.5) or (is_astern and curr_dist < 4.0)
                 separating = curr_dist > (d_safe * 1.5) and (tcpa < 0.0 or tcpa > 100.0)
                 threat_cleared = (min_dist_nom >= d_safe * 2.0 and curr_dist > d_safe * 2.0)
                 
@@ -639,7 +641,7 @@ class DecisionLayer:
         # # -----------------------------------------------------------------
         
         cls._chi_ca_latched = float(best_chi)
-        cls._p_ca_latched = float(best_p)
+        cls._p_evasive_latched = float(best_p)
         cls._t_offset_latched = float(best_t_offset)
         cls._w_evasive_latched = best_wps
         cls._mode_a_active = True

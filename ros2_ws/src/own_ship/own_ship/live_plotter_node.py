@@ -160,8 +160,8 @@ class LivePlotterNode(Node):
         self.os_history_psi.append(psi)
         
         # Index 3 is yaw rate r; Index 5 is surge speed u
-        r_val = msg.data[3] if len(msg.data) > 3 else 0.0
-        u_val = msg.data[5] if len(msg.data) > 5 else self.config.get('os_nominal_speed', 0.45)
+        u_val = msg.data[3] if len(msg.data) > 3 else self.config.get('os_nominal_speed', 0.45)
+        r_val = msg.data[5] if len(msg.data) > 5 else 0.0
         self.os_history_r.append(r_val)
         self.os_history_u.append(u_val)
         

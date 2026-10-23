@@ -11,10 +11,13 @@ Executes batch evaluation over simulation logs using the two-tier KPI framework:
 import glob
 import os
 from pathlib import Path
+import matplotlib
+matplotlib.use("Agg")  # Use non-interactive backend for headless environments
 import matplotlib.cm as cm
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import gc
 
 from gnc_core.config.vessel_params import VesselParams
 from gnc_core.tests.kpi_evaluator import ScenarioKPIEvaluator
@@ -180,7 +183,7 @@ def plot_combined_assessment_curve(df_scenario: pd.DataFrame, scenario_name: str
         if len(loss_indices) > 0:
             tip_tau = float(tau[loss_indices[0]])
             ax_eff.axvline(tip_tau, color=color, linestyle="-.", linewidth=1.1, alpha=0.65, zorder=2)
-
+            
     ax_eff.set_title(
         f"Tier 2: Total Performance Assessment ({scenario_name.upper()}): Latency Tipping Curve",
         fontsize=11, fontweight="bold", pad=8
@@ -212,24 +215,24 @@ def run_dynamic_batch(log_dir=None, d_safe=VesselParams.DCPA_safe):
         print(f"No log files found in '{log_dir}'.")
         return
 
+    # 1. Collect lightweight metadata without holding large arrays in memory
     runs = []
     for f in npz_files:
-        data = np.load(f, allow_pickle=True)
-        scenario = str(data["scenario"]) if "scenario" in data else "unknown"
-        mode = str(data["mode"]) if "mode" in data else "RA"
-        latency = float(data["latency"]) if "latency" in data else 0.0
-        interval = float(data["interval"]) if "interval" in data else 3.0
-        t_advance = float(data["t_advance"]) if "t_advance" in data else np.nan
+        with np.load(f, allow_pickle=True) as data:
+            scenario = str(data["scenario"]) if "scenario" in data else "unknown"
+            mode = str(data["mode"]) if "mode" in data else "RA"
+            latency = float(data["latency"]) if "latency" in data else 0.0
+            interval = float(data["interval"]) if "interval" in data else 3.0
+            t_advance = float(data["t_advance"]) if "t_advance" in data else np.nan
 
-        runs.append({
-            "filepath": f,
-            "scenario": scenario,
-            "mode": mode,
-            "latency": latency,
-            "interval": interval,
-            "t_advance": t_advance,
-            "data": data,
-        })
+            runs.append({
+                "filepath": f,
+                "scenario": scenario,
+                "mode": mode,
+                "latency": latency,
+                "interval": interval,
+                "t_advance": t_advance,
+            })
 
     scenarios = sorted(list(set(r["scenario"] for r in runs)))
 
@@ -243,80 +246,89 @@ def run_dynamic_batch(log_dir=None, d_safe=VesselParams.DCPA_safe):
             continue
 
         ra_entry = ra_runs[0]
-        nominal_wps = ra_entry["data"]["nominal_wps"]
 
-        # 1. Establish common evaluation window T = [t_0, t_w] across the scenario group
-        all_group_runs = ra_runs + is_runs
-        t_cutoffs = [find_cutoff_time(r["data"], nominal_wps, d_slow=2.0) for r in all_group_runs]
-        t_w = float(min(t_cutoffs))
+        # Load baseline RA file on-demand
+        with np.load(ra_entry["filepath"], allow_pickle=True) as ra_data:
+            nominal_wps = ra_data["nominal_wps"]
 
-        evaluator = ScenarioKPIEvaluator(
-            d_safe=d_safe,
-            eps_d=0.02,
-            d_far_factor=3.0,
-            r_cap=1.50,  # steady-state turning capability (rad/s)
-            nominal_waypoints=nominal_wps,
-            w_v=0.30,
-            w_c=0.70,
-            omega=0.50,
-            delta_deadband=5.0,
-        )
+            # Load scenario group files on-demand for window cutoff calculation
+            all_group_runs = ra_runs + is_runs
+            group_datas = [np.load(r["filepath"], allow_pickle=True) for r in all_group_runs]
+            t_cutoffs = [find_cutoff_time(d, nominal_wps, d_slow=2.0) for d in group_datas]
+            t_w = float(min(t_cutoffs))
 
-        # Evaluate baseline RA
-        kpi_ra = evaluator.evaluate_single_run(
-            ra_entry["data"]["t"],
-            ra_entry["data"]["os_pos"],
-            ra_entry["data"]["os_psi"],
-            ra_entry["data"]["os_r"],
-            ra_entry["data"]["ts_pos"],
-            os_u=ra_entry["data"]["os_u"] if "os_u" in ra_entry["data"] else None,
-            t_w=t_w,
-        )
+            # Close temporary open handles
+            for d in group_datas:
+                d.close()
+
+            evaluator = ScenarioKPIEvaluator(
+                d_safe=d_safe,
+                eps_d=0.02,
+                d_far_factor=3.0,
+                r_cap=1.50,
+                nominal_waypoints=nominal_wps,
+                w_v=0.30,
+                w_c=0.70,
+                omega=0.60,
+                delta_deadband=5.0,
+            )
+
+            # Evaluate baseline RA
+            kpi_ra = evaluator.evaluate_single_run(
+                ra_data["t"],
+                ra_data["os_pos"],
+                ra_data["os_psi"],
+                ra_data["os_r"],
+                ra_data["ts_pos"],
+                os_u=ra_data["os_u"] if "os_u" in ra_data else None,
+                t_w=t_w,
+            )
 
         sc_results = []
         for is_entry in is_runs:
-            kpi_is = evaluator.evaluate_single_run(
-                is_entry["data"]["t"],
-                is_entry["data"]["os_pos"],
-                is_entry["data"]["os_psi"],
-                is_entry["data"]["os_r"],
-                is_entry["data"]["ts_pos"],
-                os_u=is_entry["data"]["os_u"] if "os_u" in is_entry["data"] else None,
-                num_waypoints=len(is_entry["data"]["evasive_wps"]) if "evasive_wps" in is_entry["data"] else 0,
-                configured_interval=is_entry["interval"],
-                t_w=t_w,
-            )
-            comp = evaluator.evaluate_comparison(kpi_ra, kpi_is)
+            with np.load(is_entry["filepath"], allow_pickle=True) as is_data:
+                kpi_is = evaluator.evaluate_single_run(
+                    is_data["t"],
+                    is_data["os_pos"],
+                    is_data["os_psi"],
+                    is_data["os_r"],
+                    is_data["ts_pos"],
+                    os_u=is_data["os_u"] if "os_u" in is_data else None,
+                    num_waypoints=len(is_data["evasive_wps"]) if "evasive_wps" in is_data else 0,
+                    configured_interval=is_entry["interval"],
+                    t_w=t_w,
+                )
+                comp = evaluator.evaluate_comparison(kpi_ra, kpi_is)
 
-            sc_results.append({
-                "scenario": sc,
-                "interval": is_entry["interval"],
-                "latency": is_entry["latency"],
-                "t_advance": is_entry["t_advance"],
-                "t_w": t_w,
-                # RA Baseline
-                "ra_breached": kpi_ra["breached"],
-                "ra_dmin": kpi_ra["d_min"],
-                "ra_s": kpi_ra["s_index"],
-                "ra_class": kpi_ra["risk_class"],
-                "ra_e": kpi_ra["e_index"],
-                # IS Run
-                "is_dmin": kpi_is["d_min"],
-                "is_breached": kpi_is["breached"],
-                "is_r_dist": kpi_is["r_dist"],
-                "is_r_pk_deg": kpi_is["r_pk_deg_s"],
-                "is_r_steer": kpi_is["r_steer"],
-                "is_s": kpi_is["s_index"],
-                "is_class": kpi_is["risk_class"],
-                "is_e_spd": kpi_is["e_speed"],
-                "is_e_rte": kpi_is["e_route"],
-                "is_e": kpi_is["e_index"],
-                # Comparative Metrics
-                "i_s": comp["i_s"],
-                "i_e": comp["i_e"],
-                "i_total": comp["i_total"],
-                "outcome": comp["outcome"],
-            })
+                sc_results.append({
+                    "scenario": sc,
+                    "interval": is_entry["interval"],
+                    "latency": is_entry["latency"],
+                    "t_advance": is_entry["t_advance"],
+                    "t_w": t_w,
+                    # RA Baseline
+                    "ra_breached": kpi_ra["breached"],
+                    "ra_dmin": kpi_ra["d_min"],
+                    "ra_s": kpi_ra["s_index"],
+                    "ra_class": kpi_ra["risk_class"],
+                    "ra_e": kpi_ra["e_index"],
+                    # IS Run
+                    "is_dmin": kpi_is["d_min"],
+                    "is_breached": kpi_is["breached"],
+                    "is_r_dist": kpi_is["r_dist"],
+                    "is_r_pk_deg": kpi_is["r_pk_deg_s"],
+                    "is_r_steer": kpi_is["r_steer"],
+                    "is_s": kpi_is["s_index"],
+                    "is_class": kpi_is["risk_class"],
+                    "is_e_spd": kpi_is["e_speed"],
+                    "is_e_rte": kpi_is["e_route"],
+                    "is_e": kpi_is["e_index"],
+                    # Comparative Metrics
+                    "i_s": comp["i_s"],
+                    "i_e": comp["i_e"],
+                    "i_total": comp["i_total"],
+                    "outcome": comp["outcome"],
+                })
 
         if not sc_results:
             continue
@@ -328,9 +340,7 @@ def run_dynamic_batch(log_dir=None, d_safe=VesselParams.DCPA_safe):
         tcpa_header_str = f"{ra_tcpa_init:.1f}s" if not np.isnan(ra_tcpa_init) else "N/A"
         df_sc = df_sc.sort_values(by=["interval", "latency"], ascending=[True, True]).reset_index(drop=True)
 
-        # ---------------------------------------------------------------------
-        # Table 1: Tier 1 Safety Evaluation
-        # ---------------------------------------------------------------------
+        # Print tables
         print(f"\n==================== TIER 1: SAFETY EVALUATION: {sc.upper()} ====================")
         print(f"Common Window: t in [0.0, {t_w:.1f}s] | d_safe: {d_safe:.2f}m")
         print(
@@ -357,9 +367,6 @@ def run_dynamic_batch(log_dir=None, d_safe=VesselParams.DCPA_safe):
             })
         )
 
-        # ---------------------------------------------------------------------
-        # Table 2: Tier 2 Total Assessment (Safety + Efficiency)
-        # ---------------------------------------------------------------------
         print(f"\n============= TIER 2: TOTAL PERFORMANCE EVALUATION: {sc.upper()} =============")
         print(f"Baseline RA: E={kpi_ra['e_index']:.3f} (Speed={kpi_ra['e_speed']:.3f}, Route={kpi_ra['e_route']:.3f})")
         print("-" * 105)
@@ -380,9 +387,6 @@ def run_dynamic_batch(log_dir=None, d_safe=VesselParams.DCPA_safe):
             })
         )
 
-        # ---------------------------------------------------------------------
-        # Latency Tipping Point Report
-        # ---------------------------------------------------------------------
         print(f"\n--- Tipping Latencies for {sc.upper()} (Initial TCPA / t_advance = {tcpa_header_str}) ---")
         for dt_val, group in df_sc.groupby("interval"):
             sorted_g = group.sort_values(by="latency")
@@ -397,9 +401,13 @@ def run_dynamic_batch(log_dir=None, d_safe=VesselParams.DCPA_safe):
 
             print(f"  ΔT_IS = {dt_val:.1f}s -> tau*_imp = {tau_imp if isinstance(tau_imp, str) else f'{tau_imp:.1f}s'}, tau*_loss = {tau_loss}")
 
-        # Render two-panel figure
+        # Render figure
         if len(df_sc) > 1:
             plot_combined_assessment_curve(df_sc, sc)
+
+        # Force figure cleanup and garbage collection per scenario
+        plt.close('all')
+        gc.collect()
 
 
 if __name__ == "__main__":

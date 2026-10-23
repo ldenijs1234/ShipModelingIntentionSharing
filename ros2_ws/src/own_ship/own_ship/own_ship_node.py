@@ -222,6 +222,9 @@ class OSTransceiverNode(Node):
         self.hist_os_u = []
         self.hist_ts_pos = []
         self.hist_r = []
+        self.hist_os_wps = []
+        self.hist_ts_route = []
+        self.latest_ts_route = []
 
         # ROS Publishers and Subscribers
         self.os_state_pub = self.create_publisher(Float64MultiArray, '/os/state_vector', 10)
@@ -336,6 +339,7 @@ class OSTransceiverNode(Node):
                         f"\033[91m[OS] TS left intent comms range ({dist_to_ts:.1f}m > {r_disconnect:.1f}m). Dropping Intent.\033[0m"
                     )
                     self.w_ts_delayed = None
+                    self.latest_ts_route = []
                     self.t_intent_shared = None
 
                     empty_msg = RouteIntent()
@@ -381,6 +385,7 @@ class OSTransceiverNode(Node):
             # Promote the latest delivered packet to active intent
             _, latest_delivered_msg = ready_packets[-1]
             self.w_ts_delayed = np.array([[pt.x, pt.y] for pt in latest_delivered_msg.route], dtype=np.float64)
+            self.latest_ts_route = self.w_ts_delayed.copy()
 
             # --- Evaluate t_first_intent_rx and t_advance at Actual Delivery ---
             if self.t_first_intent_rx is None:
@@ -422,6 +427,7 @@ class OSTransceiverNode(Node):
         # Clear buffer if vessels disengage or drop out of range
         if not self.in_intent_range:
             self.w_ts_delayed = None
+            self.latest_ts_route = []
             self.intent_packet_buffer.clear()
 
         # 2. Step Synchronous Pipeline
@@ -461,6 +467,13 @@ class OSTransceiverNode(Node):
         self.hist_os_u.append(float(self.internal_state[5]))
         self.hist_ts_pos.append(ts_pos)
         self.hist_r.append(float(self.internal_state[3]))
+
+        # Record active OS route and perceived TS route step histories
+        curr_os_wps = self.cached["w_active"].copy() if ("w_active" in self.cached and self.cached["w_active"] is not None) else np.array([])
+        self.hist_os_wps.append(curr_os_wps)
+
+        curr_ts_route = self.w_ts_delayed.copy() if self.w_ts_delayed is not None else np.array([])
+        self.hist_ts_route.append(curr_ts_route)
 
         # 4. Publish Topics (Ensures live_plotter receives coordinates from t = 0)
         os_msg = Float64MultiArray(data=telemetry["x_os"].tolist())
@@ -569,6 +582,8 @@ class OSTransceiverNode(Node):
             nominal_wps=np.array(self.w_mission_os),
             evasive_wps=w_active_val,
             w_ts_delayed=np.array(self.w_ts_delayed) if self.w_ts_delayed is not None else np.array([]),
+            os_wps_hist=np.array(self.hist_os_wps, dtype=object),
+            ts_route_hist=np.array(self.hist_ts_route, dtype=object),
             hist_state=hist_state_arr,
             scenario=scenario_name,
             canal_polygons=self.canal_polygons,

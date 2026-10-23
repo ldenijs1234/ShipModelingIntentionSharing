@@ -51,7 +51,8 @@ CASE01_CONFIG = {
     "ts_mission_wps": np.array([
         [45.0, 0.0],
         [12.5, 0.0],
-        [ 0.0, 0.0]
+        [ 0.0, 0.0],
+        [-20.0, 0.0]
     ], dtype=np.float64),
     "t_sim": 85.0
 }

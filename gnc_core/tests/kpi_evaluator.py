@@ -213,11 +213,24 @@ class ScenarioKPIEvaluator:
         # TIER 2: EFFICIENCY ASSESSMENT
         # -------------------------------------------------------------
         # Speed Degradation Index E_speed
-        if len(t) > 1:
+        ranges = np.linalg.norm(ts_pos - os_pos, axis=1)
+
+        # Identify active encounter bounds where vessels are within d_far
+        encounter_mask = ranges <= self.d_far
+
+        if np.any(encounter_mask) and len(t) > 1:
+            t_enc = t[encounter_mask]
+            os_u_enc = os_u[encounter_mask]
+            duration_enc = max(t_enc[-1] - t_enc[0], 1.0)
+
+            speed_ratio_enc = np.clip(os_u_enc / max(self.u_nominal, 0.05), 0.0, 1.0)
+            e_speed = float(trapz_fn((1.0 - speed_ratio_enc) ** 2, t_enc)) / duration_enc
+        elif len(t) > 1:
             speed_ratio = np.clip(os_u / max(self.u_nominal, 0.05), 0.0, 1.0)
             e_speed = float(trapz_fn((1.0 - speed_ratio) ** 2, t)) / duration
         else:
             e_speed = 0.0
+
         e_speed = float(np.clip(e_speed, 0.0, 1.0))
 
         # Route Deviation Index E_route
@@ -271,25 +284,36 @@ class ScenarioKPIEvaluator:
         i_s = 100.0 * float(np.clip((s_ra - s_is) / max(s_ra, self.s_floor), -1.0, 1.0))
         i_e = 100.0 * float(np.clip((e_ra - e_is) / max(e_ra, self.e_floor), -1.0, 1.0))
 
-        # Total Improvement
-        i_total = float(self.omega * i_s + (1.0 - self.omega) * i_e)
+        delta = self.delta_deadband
 
         # -------------------------------------------------------------
-        # OUTCOME CLASSIFICATION (Table 4.5 Revised Rules)
+        # SAFETY-GATED TOTAL EVALUATION & OUTCOME CLASSIFICATION
         # -------------------------------------------------------------
-        delta = self.delta_deadband
-        if b_is == 1 and b_ra == 0:
-            outcome = "Loss of Improvement"
-        elif b_ra == 1 and b_is == 0:
+        if b_ra == 1 and b_is == 0:
+            # Baseline RA breached safety domain, but Intent Sharing avoided the breach.
+            # Safety strictly dominates track precision -> Mask route deviation penalty.
+            i_e_gated = 0.0
+            i_total = float(self.omega * i_s + (1.0 - self.omega) * i_e_gated)
+            
+            # Ensure i_total reflects clear improvement above the deadband
+            if i_total <= delta:
+                i_total = max(i_s, delta + 1.0)
             outcome = "Improvement"
-        elif b_is == 1 and b_ra == 1:
+
+        elif b_is == 1:
+            # Intent Sharing breached -> Critical safety failure
+            i_total = -100.0
             outcome = "Loss of Improvement"
-        elif i_total > delta:
-            outcome = "Improvement"
-        elif i_total < -delta:
-            outcome = "Loss of Improvement"
+
         else:
-            outcome = "Same / Inconclusive"
+            # Standard weighted combination when Baseline RA was already safe (b_ra == 0, b_is == 0)
+            i_total = float(self.omega * i_s + (1.0 - self.omega) * i_e)
+            if i_total > delta:
+                outcome = "Improvement"
+            elif i_total < -delta:
+                outcome = "Loss of Improvement"
+            else:
+                outcome = "Same / Inconclusive"
 
         res = {
             "b_ra": b_ra,
